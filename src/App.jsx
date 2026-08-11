@@ -74,8 +74,10 @@ const initialState = (ar = '3:4') => ({
   subjects: [],
   text: defaultText(ar),
   logo: defaultLogo(ar),
-  scrim: { max: REF.SCRIM_MAX, top: REF.SCRIM_TOP },
+  scrim: { max: REF.SCRIM_MAX, top: REF.SCRIM_TOP, full: REF.SCRIM_FULL, falloff: REF.SCRIM_FALLOFF },
 });
+
+const SCRIM_DEFAULTS = { max: REF.SCRIM_MAX, top: REF.SCRIM_TOP, full: REF.SCRIM_FULL, falloff: REF.SCRIM_FALLOFF };
 
 let nextId = 1;
 
@@ -332,14 +334,26 @@ export default function App() {
 
   const loadPreset = async (file) => {
     const preset = JSON.parse(await file.text());
-    setState((st) => ({ ...st, ...preset, subjects: st.subjects, logo: { ...preset.logo, img: st.logo.img } }));
+    setState((st) => ({
+      ...st,
+      ...preset,
+      // presets saved before the scrim gained depth/falloff only carry max+top
+      scrim: { ...SCRIM_DEFAULTS, ...preset.scrim },
+      subjects: st.subjects,
+      logo: { ...preset.logo, img: st.logo.img },
+    }));
   };
 
   const upd = (path, value) =>
     setState((st) => {
       if (path[0] === 'text') return { ...st, text: { ...st.text, [path[1]]: { ...st.text[path[1]], [path[2]]: value } } };
       if (path[0] === 'logo') return { ...st, logo: { ...st.logo, [path[1]]: value } };
-      if (path[0] === 'scrim') return { ...st, scrim: { ...st.scrim, [path[1]]: value } };
+      if (path[0] === 'scrim') {
+        const scrim = { ...st.scrim, [path[1]]: value };
+        // the solid band lives inside the total height — pulling `top` down drags `full` with it
+        if (scrim.full > scrim.top) scrim[path[1] === 'top' ? 'full' : 'top'] = value;
+        return { ...st, scrim };
+      }
       return { ...st, [path[0]]: value };
     });
 
@@ -410,8 +424,17 @@ export default function App() {
                 <input className="hex" value={state.color} onChange={(e) => upd(['color'], e.target.value)} />
               </div>
             </Row>
-            <Slider label="Scrim opacity" value={state.scrim.max} min={0} max={1} step={0.01} onChange={(v) => upd(['scrim', 'max'], v)} fmt={(v) => `${Math.round(v * 100)}%`} />
-            <Slider label="Scrim height" value={state.scrim.top} min={300} max={1600} step={10} onChange={(v) => upd(['scrim', 'top'], v)} />
+          </Group>
+
+          <Group title="Bottom gradient">
+            <Slider label="Darkness" value={state.scrim.max} min={0} max={1} step={0.01} onChange={(v) => upd(['scrim', 'max'], v)} fmt={(v) => `${Math.round(v * 100)}%`} />
+            <Slider label="Total height" value={state.scrim.top} min={0} max={2400} step={10} onChange={(v) => upd(['scrim', 'top'], v)} />
+            <Slider label="Solid depth" value={state.scrim.full} min={0} max={2400} step={10} onChange={(v) => upd(['scrim', 'full'], v)} />
+            <Slider label="Falloff" value={state.scrim.falloff} min={0.2} max={4} step={0.05} onChange={(v) => upd(['scrim', 'falloff'], v)} fmt={(v) => v.toFixed(2)} />
+            <p className="empty">
+              Height is the whole gradient, depth the solid band at the base — both measured up from the card edge.
+              Falloff below 1 fades early and lingers dark; above 1 holds clear then drops fast.
+            </p>
           </Group>
 
           <Group title="Headshots">

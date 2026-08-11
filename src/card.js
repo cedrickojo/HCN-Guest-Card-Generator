@@ -37,6 +37,7 @@ export const REF = {
   SCRIM_TOP: 829,
   SCRIM_FULL: 419,
   SCRIM_MAX: 0.78,
+  SCRIM_FALLOFF: 1.15,
   LOGO_OFF_X: 65,
   LOGO_OFF_Y: 46,
   LOGO_W_FRAC: 1789 / 1919,
@@ -47,8 +48,17 @@ export const REF = {
 
 export const FONTS = { display: 'F37Analog', mono: 'RLOkima' };
 
+/* Maps reference-space units onto an output of any size.
+ *
+ * This must be strictly proportional to W/H, or the preview stops being a
+ * faithful miniature of the export. Dividing the *frame* by the reference
+ * frame does that; subtracting an absolute margin first does not, because a
+ * fixed 240px inset is 39% of a 615px preview but only 11% of a 2160px
+ * export — which rendered preview type ~31% small at 3:4. The reference frame
+ * is the content box plus its margins: 1919+240 x 2639+240 = 2160x2880.
+ */
 export function scaleFor(W, H) {
-  return Math.min((W - 2 * REF.MARGIN) / REF.BASE_W, (H - 2 * REF.MARGIN) / REF.BASE_H);
+  return Math.min(W / (REF.BASE_W + 2 * REF.MARGIN), H / (REF.BASE_H + 2 * REF.MARGIN));
 }
 
 export function hexToRgb(hex) {
@@ -246,6 +256,18 @@ export function textRect(ctx, field, W, H, s) {
   return { x, y: field.ny * H, w: maxW, h, lines, lineH, size };
 }
 
+const clampN = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+/** Scrim geometry in device pixels. `full` is clamped to `top` so the solid
+ *  band can never overrun the fade and invert the gradient. */
+export function scrimRect(scrim, s, cardBottom) {
+  const top = Math.max(0, scrim.top ?? REF.SCRIM_TOP);
+  const full = clampN(scrim.full ?? REF.SCRIM_FULL, 0, top);
+  const y0 = cardBottom - top * s;
+  const y1 = cardBottom - full * s;
+  return { y0, y1, fadeH: y1 - y0, falloff: clampN(scrim.falloff ?? REF.SCRIM_FALLOFF, 0.2, 4) };
+}
+
 export function plateRect(logo, W, H, s) {
   if (!logo.show || !logo.img) return null;
   const h = logo.height * s;
@@ -331,21 +353,25 @@ export function drawCard(ctx, W, H, state, assets, opts = {}) {
     });
   }
 
-  /* 3. scrim — the dark gradient that absorbs cropped-off shoulders */
-  const y0 = cardBottom - state.scrim.top * s;
-  const y1 = cardBottom - REF.SCRIM_FULL * s;
-  if (y1 > y0) {
-    const grad = ictx.createLinearGradient(0, y0, 0, y1);
+  /* 3. scrim — the dark gradient that absorbs cropped-off shoulders.
+   *
+   * Three knobs, all in reference units measured up from the card's bottom
+   * edge: `top` is the total height (where the fade starts at zero opacity),
+   * `full` is the solid band at the base that sits at `max` opacity, and the
+   * fade runs between them on a `falloff` power curve. */
+  const scrimGeom = scrimRect(state.scrim, s, cardBottom);
+  if (scrimGeom.fadeH > 0) {
+    const grad = ictx.createLinearGradient(0, scrimGeom.y0, 0, scrimGeom.y1);
     grad.addColorStop(0, 'rgba(16,14,20,0)');
-    for (let k = 1; k <= 8; k++) {
-      const t = k / 8;
-      grad.addColorStop(t, `rgba(16,14,20,${Math.pow(t, 1.15) * state.scrim.max})`);
+    for (let k = 1; k <= 16; k++) {
+      const t = k / 16;
+      grad.addColorStop(t, `rgba(16,14,20,${Math.pow(t, scrimGeom.falloff) * state.scrim.max})`);
     }
     ictx.fillStyle = grad;
-    ictx.fillRect(0, y0, W, y1 - y0);
+    ictx.fillRect(0, scrimGeom.y0, W, scrimGeom.fadeH);
   }
   ictx.fillStyle = `rgba(16,14,20,${state.scrim.max})`;
-  ictx.fillRect(0, y1, W, H - y1);
+  ictx.fillRect(0, scrimGeom.y1, W, H - scrimGeom.y1);
 
   ctx.save();
   roundRectPath(ctx, cardL, cardT, cardW, cardH, R);
