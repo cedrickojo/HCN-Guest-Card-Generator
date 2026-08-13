@@ -1,8 +1,20 @@
 # HCN Card Studio
 
-A browser-based editor for HCN guest announcement cards. Same renderer as the
-`hcn-guest-card` skill — same texture, glow, grade, scrim and type metrics — but
-with direct manipulation instead of `--nudge 1 0 -120`.
+Two browser-based editors sharing one canvas renderer and one background-removal
+pipeline:
+
+| Route | Tool |
+| --- | --- |
+| `/` | **Guest cards** — HCN guest announcement cards |
+| `/thumbnail` | **Thumbnails** — 16:9 YouTube thumbnails |
+
+Routing is a ~40-line hand-rolled router (`src/router.jsx`) on real paths, so
+`vercel.json` rewrites anything that isn't a file on disk back to `index.html`.
+
+## Guest cards
+
+Same renderer as the `hcn-guest-card` skill — same texture, glow, grade, scrim
+and type metrics — but with direct manipulation instead of `--nudge 1 0 -120`.
 
 ## What it does
 
@@ -25,6 +37,38 @@ with direct manipulation instead of `--nudge 1 0 -120`.
 
 Export renders at full reference resolution (2160x2880 for 3:4) through the exact
 same `drawCard()` used for the preview. What you drag is what you download.
+
+## Thumbnails
+
+Locked to 16:9, reference space 1280x720. Layers bottom to top: background fill,
+background image, vignette, cutouts, text.
+
+- **Headshots** — any number, backgrounds come off on import and *nothing else is
+  applied* (no PSD grade — these are thumbnails, not cards). Drag to position,
+  scroll to scale, reorder front to back. Each one has an optional coral halo
+  using the same square-root falloff as the guest cards, with its own colour,
+  size and strength.
+- **Background** — any image, cover-fitted, with zoom and pan plus brightness,
+  contrast and saturation. Falls back to a flat fill colour.
+- **Vignette** — independent strength per side, or all four at once, with a
+  shared softness and colour. Smoothstep falloff, because a linear ramp leaves a
+  visible band where it meets the untouched middle. Sits under the cutouts by
+  default so faces stay lit; tick *Over headshots* to frame the whole composition.
+- **Text** — any number of blocks, each with its own font, size, colour,
+  alignment, line spacing and uppercase toggle. Newlines or `||` break lines.
+  Any block can carry a highlight: a rounded plate behind each line, sized off
+  the glyph bounding box so it hugs the cap height rather than the font's full
+  line box. Keep a highlighted line as its own block, as in the DOAC reference.
+- **Export** — 1280x720 or 1920x1080, PNG or JPEG. The last export's file size is
+  shown, with a warning past YouTube's 2MB ceiling.
+
+Fonts are the two bundled brand faces plus Arial Black, Impact and the system
+sans. The latter three resolve on the designer's machine, so a thumbnail built
+on a Mac may set differently on a Windows box.
+
+As with the cards, `drawThumb()` renders both the preview and the export, and
+its scale is strictly proportional to output width — text geometry is identical
+at 1024, 1280 and 1920 to within rounding.
 
 ## Run it
 

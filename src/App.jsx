@@ -12,6 +12,8 @@ import {
   trimLogo,
 } from './card.js';
 import { cutout } from './removeBg.js';
+import { Group, Row, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
+import { Tabs } from './router.jsx';
 
 const MAX_PREVIEW = 820;
 
@@ -81,10 +83,9 @@ const SCRIM_DEFAULTS = { max: REF.SCRIM_MAX, top: REF.SCRIM_TOP, full: REF.SCRIM
 
 let nextId = 1;
 
-export default function App() {
+export default function App({ path }) {
   const [state, setState] = useState(() => initialState());
   const [assets, setAssets] = useState(null);
-  const [fontsReady, setFontsReady] = useState(false);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState(null); // {kind:'subject'|'text'|'logo', id|key}
@@ -93,6 +94,8 @@ export default function App() {
   const fileRef = useRef(null);
   const logoRef = useRef(null);
   const presetRef = useRef(null);
+
+  const fontsReady = useBrandFonts();
 
   const [W, H] = ASPECTS[state.ar];
   const previewW = W >= H ? MAX_PREVIEW : Math.round((MAX_PREVIEW * W) / H);
@@ -110,14 +113,6 @@ export default function App() {
         });
       const [texture, lockup] = await Promise.all([load('/assets/bg_texture.png'), load('/assets/logo.png')]);
       setAssets({ texture, lockup });
-    })();
-    (async () => {
-      const faces = [
-        new FontFace('F37Analog', 'url(/assets/F37Analog-SemiBold.otf)'),
-        new FontFace('RLOkima', 'url(/assets/RL-Okima-Ink-102.otf)'),
-      ];
-      await Promise.all(faces.map((f) => f.load().then((l) => document.fonts.add(l))));
-      setFontsReady(true);
     })();
   }, []);
 
@@ -381,6 +376,7 @@ export default function App() {
           <span className="dot" style={{ background: state.color }} />
           HCN CARD STUDIO
         </div>
+        <Tabs path={path} />
         <div className="head-actions">
           <button className="ghost" onClick={savePreset}>Save preset</button>
           <button className="ghost" onClick={() => presetRef.current.click()}>Load preset</button>
@@ -509,39 +505,6 @@ export default function App() {
   );
 }
 
-/* ---- small UI pieces ---- */
-
-function Group({ title, children }) {
-  return (
-    <section className="group">
-      <h2>{title}</h2>
-      {children}
-    </section>
-  );
-}
-
-function Row({ label, children }) {
-  return (
-    <div className="row">
-      <label>{label}</label>
-      {children}
-    </div>
-  );
-}
-
-function Slider({ label, value, min, max, step, onChange, fmt }) {
-  return (
-    <div className="row slider">
-      <label>
-        {label} <b>{fmt ? fmt(value) : Math.round(value)}</b>
-      </label>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} />
-    </div>
-  );
-}
-
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 async function dims(file) {
   try {

@@ -8,6 +8,20 @@
  * the full-resolution export, so what you drag is what you download.
  */
 
+import {
+  CORAL,
+  clampN,
+  hexToRgb,
+  makeCanvas,
+  roundRectPath,
+  rgbToHex,
+  splitLines,
+  subjectRect,
+  tintGlow,
+} from './shared.js';
+
+export { CORAL, hexToRgb, rgbToHex, splitLines, subjectRect };
+
 export const ASPECTS = {
   '3:4': [2160, 2880],
   '4:5': [2160, 2700],
@@ -15,8 +29,6 @@ export const ASPECTS = {
   '9:16': [2160, 3840],
   '16:9': [3840, 2160],
 };
-
-export const CORAL = [255, 101, 85];
 
 export const REF = {
   BASE_W: 1919,
@@ -59,36 +71,6 @@ export const FONTS = { display: 'F37Analog', mono: 'RLOkima' };
  */
 export function scaleFor(W, H) {
   return Math.min(W / (REF.BASE_W + 2 * REF.MARGIN), H / (REF.BASE_H + 2 * REF.MARGIN));
-}
-
-export function hexToRgb(hex) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-  if (!m) return CORAL.slice();
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-export function rgbToHex([r, g, b]) {
-  return '#' + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
-}
-
-function makeCanvas(w, h) {
-  if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  return c;
-}
-
-function roundRectPath(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
 }
 
 /* ---------- one-time image preparation ---------- */
@@ -224,19 +206,6 @@ function sheenLayer(W, H) {
 
 /* ---------- layout ---------- */
 
-export function subjectRect(sub, W, H) {
-  const h = sub.scale * H;
-  const w = (sub.img.width / sub.img.height) * h;
-  return { x: sub.nx * W - w / 2, y: sub.ny * H - h / 2, w, h };
-}
-
-export function splitLines(text) {
-  return String(text ?? '')
-    .split('||')
-    .map((t) => t.trim())
-    .filter((t, i, a) => t.length > 0 || a.length === 1);
-}
-
 function setFont(ctx, field, s) {
   const family = field.font === 'display' ? FONTS.display : FONTS.mono;
   ctx.font = `${Math.round(field.size * s)}px "${family}"`;
@@ -255,8 +224,6 @@ export function textRect(ctx, field, W, H, s) {
   const x = field.align === 'center' ? x0 - maxW / 2 : field.align === 'right' ? x0 - maxW : x0;
   return { x, y: field.ny * H, w: maxW, h, lines, lineH, size };
 }
-
-const clampN = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
 /** Scrim geometry in device pixels. `full` is clamped to `top` so the solid
  *  band can never overrun the fade and invert the gradient. */
@@ -322,15 +289,7 @@ export function drawCard(ctx, W, H, state, assets, opts = {}) {
     gctx.filter = `blur(${(REF.GLOW_SIZE * s) / 3}px)`;
     gctx.drawImage(sil, 0, 0);
     gctx.filter = 'none';
-    const gimg = gctx.getImageData(0, 0, W, H);
-    const gd = gimg.data;
-    for (let i = 0; i < gd.length; i += 4) {
-      gd[i] = accent[0];
-      gd[i + 1] = accent[1];
-      gd[i + 2] = accent[2];
-      gd[i + 3] = Math.sqrt(gd[i + 3] / 255) * REF.GLOW_OPACITY * 255;
-    }
-    gctx.putImageData(gimg, 0, 0);
+    tintGlow(gctx, W, H, accent, REF.GLOW_OPACITY);
     ictx.drawImage(glow, 0, 0);
 
     // subjects back to front, with a soft separation shadow under each overlap

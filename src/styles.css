@@ -69,6 +69,32 @@ header {
   gap: 8px;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-right: auto;
+  margin-left: 8px;
+}
+
+.tabs a {
+  color: var(--dim);
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 13px;
+}
+
+.tabs a:hover {
+  color: var(--text);
+}
+
+.tabs a.on {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--panel);
+}
+
 main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 372px;
@@ -98,6 +124,23 @@ canvas.card {
 
 canvas.card:active {
   cursor: grabbing;
+}
+
+canvas.card.thumb {
+  max-width: 1024px;
+  max-height: calc(100vh - 210px);
+  border-radius: 6px;
+}
+
+.hint.warn {
+  color: #ffb4a8;
+}
+
+.group h2 .x {
+  float: right;
+  padding: 0 7px;
+  line-height: 1.3;
+  margin-top: -3px;
 }
 
 .hint {
