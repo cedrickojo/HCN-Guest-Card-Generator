@@ -202,7 +202,14 @@ export default function Thumbnail({ path }) {
       }
       const ring =
         painting && brushPos ? { x: brushPos[0], y: brushPos[1], r: brush.size, feather: brush.feather, mode: tool.mode } : null;
-      drawThumb(ctx, PREVIEW_W, PREVIEW_H, state, { selection: selectionRect(ctx), cropping, brush: ring });
+      // while a stroke is in flight the cutout changes every tick, so its halo
+      // could never cache — skip it until the stroke lands
+      drawThumb(ctx, PREVIEW_W, PREVIEW_H, state, {
+        selection: selectionRect(ctx),
+        cropping,
+        brush: ring,
+        paintingId: paintRef.current?.id ?? null,
+      });
     });
     return () => cancelAnimationFrame(raf);
   }, [state, fontsReady, selectionRect, cropSubject, liveBox, painting, brushPos, brush, tool]);
@@ -241,19 +248,71 @@ export default function Thumbnail({ path }) {
    * Strokes live in source-image coordinates so they survive crops, matte
    * changes and re-cuts. During the drag the recomposite runs on a throttle
    * for live feedback; pointerup commits the stroke into state, which is what
-   * makes one stroke one undo entry. */
+   * makes one stroke one undo entry.
+   *
+   * Live feedback never touches the full-resolution image: a 4K headshot is
+   * an 8M-pixel loop per frame, which is exactly the jank a brush can't have.
+   * Instead each subject gets a proxy capped at 1280px — already finer than
+   * it renders in the preview — and live edits recomposite that, skipping the
+   * decontamination passes too. The full-resolution recomposite runs once,
+   * shortly after the interaction ends, so the export never sees the proxy. */
+  const PROXY_MAX = 1280;
+  const proxyCache = useRef(new WeakMap()); // src bitmap -> {src, k, w, h}
+
+  const proxyFor = (srcBmp) => {
+    const hit = proxyCache.current.get(srcBmp);
+    if (hit) return hit;
+    const k = Math.min(1, PROXY_MAX / Math.max(srcBmp.width, srcBmp.height));
+    let entry;
+    if (k === 1) {
+      entry = { src: srcBmp, k: 1, w: srcBmp.width, h: srcBmp.height };
+    } else {
+      const w = Math.round(srcBmp.width * k);
+      const h = Math.round(srcBmp.height * k);
+      const cv = document.createElement('canvas');
+      cv.width = w;
+      cv.height = h;
+      cv.getContext('2d').drawImage(srcBmp, 0, 0, w, h);
+      entry = { src: cv, k, w, h };
+    }
+    proxyCache.current.set(srcBmp, entry);
+    return entry;
+  };
+
   const recomposeWith = (s, strokes) =>
     composeCutout(s.src, s.mask, s.matte, renderStrokes(strokes, s.src.width, s.src.height));
+
+  const liveRecompose = (s, strokes) => {
+    const p = proxyFor(s.src);
+    return composeCutout(p.src, s.mask, s.matte, renderStrokes(strokes, p.w, p.h, p.k), { fast: true, blurScale: p.k });
+  };
+
+  /** One full-resolution pass after the interaction settles; replaces the
+   *  proxy the live edits left in place. */
+  const scheduleFullRecompose = (id, delay = 80) => {
+    const key = `full:${id}`;
+    clearTimeout(recomposeRef.current.get(key));
+    recomposeRef.current.set(
+      key,
+      setTimeout(() => {
+        recomposeRef.current.delete(key);
+        setState((st) => ({
+          ...st,
+          subjects: st.subjects.map((s) => (s.id === id ? { ...s, img: recomposeWith(s, s.strokes) } : s)),
+        }));
+      }, delay)
+    );
+  };
 
   const paintTick = (force) => {
     const P = paintRef.current;
     if (!P) return;
     const now = performance.now();
-    if (!force && now - P.last < 120) return;
+    if (!force && now - P.last < 70) return;
     P.last = now;
     setState((st) => ({
       ...st,
-      subjects: st.subjects.map((s) => (s.id === P.id ? { ...s, img: recomposeWith(s, [...s.strokes, P.stroke]) } : s)),
+      subjects: st.subjects.map((s) => (s.id === P.id ? { ...s, img: liveRecompose(s, [...s.strokes, P.stroke]) } : s)),
     }));
   };
 
@@ -355,14 +414,17 @@ export default function Thumbnail({ path }) {
     if (paintRef.current) {
       const P = paintRef.current;
       paintRef.current = null;
+      // commit at proxy resolution so this frame stays responsive; the
+      // full-resolution pass lands a beat later
       setState((st) => ({
         ...st,
         subjects: st.subjects.map((s) => {
           if (s.id !== P.id) return s;
           const strokes = [...s.strokes, P.stroke];
-          return { ...s, strokes, img: recomposeWith(s, strokes) };
+          return { ...s, strokes, img: liveRecompose(s, strokes) };
         }),
       }));
+      scheduleFullRecompose(P.id);
       return;
     }
     if (cropDragRef.current) {
@@ -519,18 +581,21 @@ export default function Thumbnail({ path }) {
       subjects: st.subjects.map((s) => (s.id === id ? { ...s, matte: { ...s.matte, [key]: value } } : s)),
     }));
     // one timer per subject: a single shared timer would let a tweak on one
-    // headshot cancel a pending recomposite on another and leave it stale
-    clearTimeout(recomposeRef.current.get(id));
+    // headshot cancel a pending recomposite on another and leave it stale.
+    // The tight timer previews on the proxy; the slow one finalises full-res.
+    const liveKey = `live:${id}`;
+    clearTimeout(recomposeRef.current.get(liveKey));
     recomposeRef.current.set(
-      id,
+      liveKey,
       setTimeout(() => {
-        recomposeRef.current.delete(id);
+        recomposeRef.current.delete(liveKey);
         setState((st) => ({
           ...st,
-          subjects: st.subjects.map((s) => (s.id === id ? { ...s, img: recomposeWith(s, s.strokes) } : s)),
+          subjects: st.subjects.map((s) => (s.id === id ? { ...s, img: liveRecompose(s, s.strokes) } : s)),
         }));
-      }, 140)
+      }, 60)
     );
+    scheduleFullRecompose(id, 500);
   };
 
   /** Only a change of model needs the model run again. */

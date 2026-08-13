@@ -31,10 +31,13 @@ export const DEFAULT_MATTE = { softness: 0, shift: 0, hardness: 1, clean: 0 };
  * forces pixels in, black forces them out, at the stroke's own opacity.
  */
 
-export function renderStrokes(strokes, w, h) {
+export function renderStrokes(strokes, w, h, scale = 1) {
   if (!strokes || !strokes.length) return null;
+  // w/h are OUTPUT dims; stroke coordinates stay in source space and `scale`
+  // maps them down, so the same vectors render onto a proxy or the full image
   const cv = makeCanvas(w, h);
   const ctx = cv.getContext('2d', { willReadFrequently: true });
+  if (scale !== 1) ctx.scale(scale, scale);
   for (const st of strokes) {
     const col = st.mode === 'add' ? '255,255,255' : '0,0,0';
     const r = Math.max(1, st.size);
@@ -111,15 +114,19 @@ function decontaminate(d, w, h, iterations) {
  * @param m       {softness, shift, hardness, clean}
  * @param touch   optional source-sized canvas from renderStrokes(); white
  *                pixels force the matte in, black pixels force it out
+ * @param opts    {fast, blurScale} — fast skips the decontamination passes
+ *                (the most expensive step) for live preview during a drag;
+ *                blurScale keeps softness visually constant on a downscaled
+ *                proxy, whose pixels are bigger than source pixels
  * @returns a canvas holding the composited cutout
  */
-export function composeCutout(source, mask, m = DEFAULT_MATTE, touch = null) {
+export function composeCutout(source, mask, m = DEFAULT_MATTE, touch = null, opts = {}) {
   const w = source.width;
   const h = source.height;
 
   const mc = makeCanvas(w, h);
   const mx = mc.getContext('2d', { willReadFrequently: true });
-  if (m.softness > 0) mx.filter = `blur(${m.softness}px)`;
+  if (m.softness > 0) mx.filter = `blur(${m.softness * (opts.blurScale ?? 1)}px)`;
   mx.drawImage(mask, 0, 0, w, h);
   mx.filter = 'none';
   const mdata = mx.getImageData(0, 0, w, h).data;
@@ -150,7 +157,7 @@ export function composeCutout(source, mask, m = DEFAULT_MATTE, touch = null) {
     d[p] = o <= 0 ? 0 : o >= 1 ? 255 : o * 255;
   }
 
-  if (m.clean > 0) decontaminate(d, w, h, m.clean);
+  if (m.clean > 0 && !opts.fast) decontaminate(d, w, h, m.clean);
 
   cx.putImageData(img, 0, 0);
   return cv;

@@ -104,9 +104,13 @@ export function drawVignette(ctx, W, H, v) {
 /* ---------- cutouts ---------- */
 
 /* The halo is built on a canvas cropped to the subject's bounds plus the blur
- * spread, not a full-frame one. With several subjects redrawing on every drag
- * frame, a full-frame getImageData each is the difference between smooth and
- * unusable. */
+ * spread, not a full-frame one — and cached against the cutout it was built
+ * from. The blur-and-readback is by far the most expensive part of a redraw,
+ * and the halo only actually changes when the cutout, its size on canvas, its
+ * crop or the glow settings do; position changes just move it. Keyed weakly
+ * on the cutout so replaced images drop their stale halo automatically. */
+const glowCache = new WeakMap();
+
 function drawGlow(ctx, sub, r, s) {
   const g = sub.glow;
   const spread = Math.max(1, g.size * s);
@@ -115,6 +119,13 @@ function drawGlow(ctx, sub, r, s) {
   const gw = Math.ceil(r.w + spread * 2);
   const gh = Math.ceil(r.h + spread * 2);
   if (gw <= 0 || gh <= 0) return;
+  const c = sub.crop;
+  const key = `${Math.round(r.w)}|${Math.round(r.h)}|${g.color}|${g.size}|${g.opacity}|${c ? `${c.x},${c.y},${c.w},${c.h}` : ''}`;
+  const hit = glowCache.get(sub.img);
+  if (hit && hit.key === key) {
+    ctx.drawImage(hit.cv, r.x + hit.dx, r.y + hit.dy);
+    return;
+  }
   const cv = makeCanvas(gw, gh);
   const gctx = cv.getContext('2d', { willReadFrequently: true });
   const { sx, sy, sw, sh } = sourceRect(sub);
@@ -122,6 +133,7 @@ function drawGlow(ctx, sub, r, s) {
   gctx.drawImage(sub.img, sx, sy, sw, sh, r.x - gx, r.y - gy, r.w, r.h);
   gctx.filter = 'none';
   tintGlow(gctx, gw, gh, hexToRgb(g.color), g.opacity);
+  glowCache.set(sub.img, { key, cv, dx: gx - r.x, dy: gy - r.y });
   ctx.drawImage(cv, gx, gy);
 }
 
@@ -275,7 +287,7 @@ export function drawThumb(ctx, W, H, state, opts = {}) {
       continue;
     }
     const r = subjectRect(sub, W, H);
-    if (sub.glow.on) drawGlow(ctx, sub, r, s);
+    if (sub.glow.on && sub.id !== opts.paintingId) drawGlow(ctx, sub, r, s);
     const { sx, sy, sw, sh } = sourceRect(sub);
     ctx.save();
     if (filt) ctx.filter = filt;
