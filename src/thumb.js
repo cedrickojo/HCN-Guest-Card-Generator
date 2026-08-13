@@ -11,9 +11,9 @@
  * than just push the backdrop back.
  */
 
-import { clampN, hexToRgb, makeCanvas, roundRectPath, splitLines, subjectRect, tintGlow } from './shared.js';
+import { clampN, hexToRgb, makeCanvas, roundRectPath, sourceRect, splitLines, subjectRect, tintGlow } from './shared.js';
 
-export { subjectRect };
+export { sourceRect, subjectRect };
 
 export const THUMB = { W: 1280, H: 720 };
 
@@ -117,8 +117,9 @@ function drawGlow(ctx, sub, r, s) {
   if (gw <= 0 || gh <= 0) return;
   const cv = makeCanvas(gw, gh);
   const gctx = cv.getContext('2d', { willReadFrequently: true });
+  const { sx, sy, sw, sh } = sourceRect(sub);
   gctx.filter = `blur(${spread / 3}px)`;
-  gctx.drawImage(sub.img, r.x - gx, r.y - gy, r.w, r.h);
+  gctx.drawImage(sub.img, sx, sy, sw, sh, r.x - gx, r.y - gy, r.w, r.h);
   gctx.filter = 'none';
   tintGlow(gctx, gw, gh, hexToRgb(g.color), g.opacity);
   ctx.drawImage(cv, gx, gy);
@@ -194,6 +195,54 @@ function drawText(ctx, item, W, H, s) {
   for (const ln of L.lines) ctx.fillText(ln.text, ln.x, ln.baseline);
 }
 
+/* ---------- crop ---------- */
+
+/** Where the subject's *whole* image would sit if it weren't cropped, given
+ *  that the cropped region must stay exactly where it is on the canvas. That
+ *  is the frame you drag a crop box inside. */
+export function cropFrame(sub, W, H) {
+  const box = subjectRect(sub, W, H);
+  const c = sub.crop || { x: 0, y: 0, w: 1, h: 1 };
+  const pxPerSrc = box.w / (c.w * sub.img.width);
+  return {
+    box,
+    full: {
+      x: box.x - c.x * sub.img.width * pxPerSrc,
+      y: box.y - c.y * sub.img.height * pxPerSrc,
+      w: sub.img.width * pxPerSrc,
+      h: sub.img.height * pxPerSrc,
+    },
+  };
+}
+
+/** Screen-space box back to a normalised crop, clamped inside the image. */
+export function boxToCrop(full, box) {
+  const x = clampN((box.x - full.x) / full.w, 0, 1);
+  const y = clampN((box.y - full.y) / full.h, 0, 1);
+  const w = clampN(box.w / full.w, 0.02, 1 - x);
+  const h = clampN(box.h / full.h, 0.02, 1 - y);
+  return { x, y, w, h };
+}
+
+/* ---------- overlays ---------- */
+
+export function overlayRect(ov, W, H) {
+  const h = ov.scale * H;
+  const w = (ov.img.width / ov.img.height) * h;
+  return { x: ov.nx * W - w / 2, y: ov.ny * H - h / 2, w, h };
+}
+
+function drawOverlays(ctx, W, H, overlays, front) {
+  for (const ov of [...overlays].sort((a, b) => a.z - b.z)) {
+    if (!ov.show || !!ov.front !== front) continue;
+    const r = overlayRect(ov, W, H);
+    ctx.save();
+    ctx.globalAlpha = ov.opacity;
+    ctx.drawImage(ov.img, r.x, r.y, r.w, r.h);
+    ctx.restore();
+  }
+}
+
 /* ---------- the thumbnail ---------- */
 
 export function drawThumb(ctx, W, H, state, opts = {}) {
@@ -204,15 +253,30 @@ export function drawThumb(ctx, W, H, state, opts = {}) {
   drawBackground(ctx, W, H, state.bg);
   if (!state.vignette.overSubjects) drawVignette(ctx, W, H, state.vignette);
 
+  const cropping = opts.cropping;
   for (const sub of [...state.subjects].sort((a, b) => a.z - b.z)) {
+    if (cropping && cropping.id === sub.id) {
+      // while cropping, the subject shows whole so you can see what you are
+      // cutting away; the halo would only trace a silhouette about to change
+      const f = cropping.frame.full;
+      ctx.drawImage(sub.img, f.x, f.y, f.w, f.h);
+      continue;
+    }
     const r = subjectRect(sub, W, H);
     if (sub.glow.on) drawGlow(ctx, sub, r, s);
-    ctx.drawImage(sub.img, r.x, r.y, r.w, r.h);
+    const { sx, sy, sw, sh } = sourceRect(sub);
+    ctx.drawImage(sub.img, sx, sy, sw, sh, r.x, r.y, r.w, r.h);
   }
+
+  drawOverlays(ctx, W, H, state.overlays || [], false);
 
   if (state.vignette.overSubjects) drawVignette(ctx, W, H, state.vignette);
 
   for (const item of state.texts) drawText(ctx, item, W, H, s);
+
+  drawOverlays(ctx, W, H, state.overlays || [], true);
+
+  if (cropping) drawCropOverlay(ctx, W, H, cropping.box, s);
 
   /* selection affordance — preview only, never exported */
   if (opts.selection) {
@@ -221,6 +285,41 @@ export function drawThumb(ctx, W, H, state, opts = {}) {
     ctx.lineWidth = Math.max(1.5, 3 * s);
     ctx.setLineDash([10 * s, 7 * s]);
     ctx.strokeRect(sel.x, sel.y, sel.w, sel.h);
+  }
+  ctx.restore();
+}
+
+/* Everything outside the crop box goes dim, the box itself gets corner ticks —
+ * the standard crop affordance, drawn on the canvas so it lines up exactly
+ * with the pixels it describes. */
+function drawCropOverlay(ctx, W, H, box, s) {
+  ctx.save();
+  // dim the whole frame, not just the subject's bounds — a partial scrim reads
+  // as a rendering artefact rather than as "this is what you're keeping"
+  ctx.fillStyle = 'rgba(8,8,12,0.62)';
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H);
+  ctx.rect(box.x, box.y, box.w, box.h);
+  ctx.fill('evenodd');
+
+  ctx.strokeStyle = '#ff655c';
+  ctx.lineWidth = Math.max(1.5, 2.5 * s);
+  ctx.strokeRect(box.x, box.y, box.w, box.h);
+
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = Math.max(2, 5 * s);
+  const t = Math.min(box.w, box.h) * 0.16;
+  for (const [cx, cy, dx, dy] of [
+    [box.x, box.y, 1, 1],
+    [box.x + box.w, box.y, -1, 1],
+    [box.x, box.y + box.h, 1, -1],
+    [box.x + box.w, box.y + box.h, -1, -1],
+  ]) {
+    ctx.beginPath();
+    ctx.moveTo(cx + dx * t, cy);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx, cy + dy * t);
+    ctx.stroke();
   }
   ctx.restore();
 }

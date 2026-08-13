@@ -47,10 +47,24 @@ export function splitLines(text) {
     .filter((t, i, a) => t.length > 0 || a.length === 1);
 }
 
-/** A placed image, sized as a fraction of canvas height and centred on nx/ny. */
+/** The region of the source image that is actually drawn. `crop` is normalised
+ *  0..1 against the source; subjects without one draw whole, which is every
+ *  subject on the guest-card page. */
+export function sourceRect(sub) {
+  const iw = sub.img.width;
+  const ih = sub.img.height;
+  const c = sub.crop;
+  if (!c) return { sx: 0, sy: 0, sw: iw, sh: ih };
+  return { sx: c.x * iw, sy: c.y * ih, sw: c.w * iw, sh: c.h * ih };
+}
+
+/** A placed image, sized as a fraction of canvas height and centred on nx/ny.
+ *  Aspect comes from the cropped region, so cropping reshapes in place rather
+ *  than rescaling the whole subject. */
 export function subjectRect(sub, W, H) {
+  const { sw, sh } = sourceRect(sub);
   const h = sub.scale * H;
-  const w = (sub.img.width / sub.img.height) * h;
+  const w = (sw / sh) * h;
   return { x: sub.nx * W - w / 2, y: sub.ny * H - h / 2, w, h };
 }
 

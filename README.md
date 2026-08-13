@@ -48,6 +48,21 @@ background image, vignette, cutouts, text.
   scroll to scale, reorder front to back. Each one has an optional coral halo
   using the same square-root falloff as the guest cards, with its own colour,
   size and strength.
+- **Cutout edge** — the model runs once and its matte is kept, so the four edge
+  controls are a local recomposite rather than another few seconds of inference.
+  *Hardness* pushes half-transparent pixels to a decision, *shift* walks the
+  boundary in or out, *softness* feathers it, and *clean* pulls interior colour
+  outward over a surviving background rim, one pixel per pass. Defaults are the
+  identity transform, so an untouched import is exactly the model's own output.
+- **Cutout model** — the library's default is `isnet_fp16`; this tool asks for
+  full-precision `isnet` instead, because half precision is where mattes fall
+  apart on dark hair and dark skin against dark sets. Any placed headshot can be
+  re-cut with a different model from its own panel.
+- **Crop** — per headshot, with a drag-a-box crop mode. The subject shows whole
+  while cropping so you can see what you're cutting, and the kept region lands
+  exactly where you drew the box.
+- **Overlays** — any number of extra images placed as-is (no background removal)
+  with position, scale, opacity and a front/behind-text toggle.
 - **Background** — any image, cover-fitted, with zoom and pan plus brightness,
   contrast and saturation. Falls back to a flat fill colour.
 - **Vignette** — independent strength per side, or all four at once, with a
@@ -61,6 +76,10 @@ background image, vignette, cutouts, text.
   line box. Keep a highlighted line as its own block, as in the DOAC reference.
 - **Export** — 1280x720 or 1920x1080, PNG or JPEG. The last export's file size is
   shown, with a warning past YouTube's 2MB ceiling.
+
+Every upload area takes a file three ways: the button, a drag-and-drop, or a
+paste. Paste needs a target — click the zone (it says "Ready") and ⌘V lands
+there, so a clipboard image can't land in the wrong slot.
 
 Fonts are the two bundled brand faces plus Arial Black, Impact and the system
 sans. The latter three resolve on the designer's machine, so a thumbnail built

@@ -12,7 +12,7 @@ import {
   trimLogo,
 } from './card.js';
 import { cutout } from './removeBg.js';
-import { Group, Row, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
+import { DropZone, Group, Row, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
 import { Tabs } from './router.jsx';
 
 const MAX_PREVIEW = 820;
@@ -91,8 +91,6 @@ export default function App({ path }) {
   const [sel, setSel] = useState(null); // {kind:'subject'|'text'|'logo', id|key}
   const canvasRef = useRef(null);
   const dragRef = useRef(null);
-  const fileRef = useRef(null);
-  const logoRef = useRef(null);
   const presetRef = useRef(null);
 
   const fontsReady = useBrandFonts();
@@ -434,10 +432,7 @@ export default function App({ path }) {
           </Group>
 
           <Group title="Headshots">
-            <button className="wide" onClick={() => fileRef.current.click()} disabled={busy}>
-              {busy ? 'Working…' : 'Add headshots'}
-            </button>
-            <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(e) => e.target.files.length && addHeadshots(e.target.files)} />
+            <DropZone label={busy ? 'Working…' : 'Add headshots'} multiple disabled={busy} onFiles={addHeadshots} />
             {layerOrder.length === 0 && <p className="empty">Add a headshot to start. Backgrounds come off automatically.</p>}
             <ul className="layers">
               {layerOrder.map((s) => (
@@ -485,10 +480,7 @@ export default function App({ path }) {
             <Row label="Include">
               <input type="checkbox" checked={state.logo.show} onChange={(e) => upd(['logo', 'show'], e.target.checked)} />
             </Row>
-            <button className="wide" onClick={() => logoRef.current.click()}>
-              {state.logo.img ? `Replace — ${state.logo.name}` : 'Add logo'}
-            </button>
-            <input ref={logoRef} type="file" accept="image/*" hidden onChange={(e) => e.target.files[0] && addLogo(e.target.files[0])} />
+            <DropZone label={state.logo.img ? `Replace — ${state.logo.name}` : 'Add logo'} onFiles={([f]) => addLogo(f)} />
             <Slider label="Plate height" value={state.logo.height} min={100} max={420} step={2} onChange={(v) => upd(['logo', 'height'], v)} />
             <Slider label="Padding" value={state.logo.pad} min={0} max={140} step={1} onChange={(v) => upd(['logo', 'pad'], v)} />
             <Slider label="Corner radius" value={state.logo.radius} min={0} max={2.4} step={0.05} onChange={(v) => upd(['logo', 'radius'], v)} fmt={(v) => `${Math.round(v * REF.PLATE_RADIUS)}px`} />

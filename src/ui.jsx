@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 const FACES = [
   ['F37Analog', '/assets/F37Analog-SemiBold.otf'],
@@ -87,6 +87,79 @@ export function Segmented({ label, value, options, onChange }) {
         ))}
       </div>
     </Row>
+  );
+}
+
+/* Three ways in: the button, a drop, or a paste.
+ *
+ * Paste needs a target, because a bare window-level paste handler can't tell
+ * whether you meant the headshots, the backdrop or an overlay. Focusing the
+ * zone is that target — click it (or tab to it) and it says so, then ⌘V lands
+ * there. The listener is on the window because paste only fires on focused
+ * editable elements, and this is a div. */
+export function DropZone({ label, hint, multiple, onFiles, disabled, children }) {
+  const [armed, setArmed] = useState(false);
+  const [over, setOver] = useState(false);
+  const inputRef = useRef(null);
+
+  const take = useCallback(
+    (list) => {
+      const files = Array.from(list || []).filter((f) => f.type.startsWith('image/'));
+      if (files.length) onFiles(multiple ? files : [files[0]]);
+    },
+    [multiple, onFiles]
+  );
+
+  useEffect(() => {
+    if (!armed || disabled) return;
+    const onPaste = (e) => {
+      // an image copied from a browser or Preview arrives as a file; one copied
+      // as a URL does not, and we let that fall through untouched
+      const files = Array.from(e.clipboardData?.files || []);
+      if (!files.some((f) => f.type.startsWith('image/'))) return;
+      e.preventDefault();
+      take(files);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [armed, disabled, take]);
+
+  return (
+    <div
+      className={`drop${over ? ' over' : ''}${armed ? ' armed' : ''}${disabled ? ' off' : ''}`}
+      tabIndex={disabled ? -1 : 0}
+      onFocus={() => setArmed(true)}
+      onBlur={() => setArmed(false)}
+      onDragOver={(e) => {
+        if (disabled) return;
+        e.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        if (disabled) return;
+        e.preventDefault();
+        setOver(false);
+        take(e.dataTransfer.files);
+      }}
+    >
+      <button className="wide" disabled={disabled} onClick={() => inputRef.current.click()}>
+        {label}
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple={multiple}
+        hidden
+        onChange={(e) => {
+          take(e.target.files);
+          e.target.value = '';
+        }}
+      />
+      <p className="dhint">{armed ? 'Ready — press ⌘V to paste' : hint || 'or drop a file, or click here then ⌘V'}</p>
+      {children}
+    </div>
   );
 }
 
