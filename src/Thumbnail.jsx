@@ -11,17 +11,20 @@ import {
   exportThumb,
   overlayRect,
   scaleFor,
+  sourceRect,
   subjectRect,
   textLayout,
 } from './thumb.js';
 import { DEFAULT_MODEL, MODELS, alphaMatte } from './removeBg.js';
-import { DEFAULT_MATTE, composeCutout } from './matte.js';
+import { DEFAULT_MATTE, composeCutout, renderStrokes } from './matte.js';
 import { ColorRow, DropZone, Group, Row, Segmented, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
 import { Tabs } from './router.jsx';
 
 const PREVIEW_W = 1024;
 const PREVIEW_H = Math.round((PREVIEW_W * THUMB.H) / THUMB.W);
 const FULL_CROP = { x: 0, y: 0, w: 1, h: 1 };
+const NEUTRAL_ADJUST = { brightness: 1, contrast: 1, saturation: 1 };
+const UNDO_LIMIT = 25;
 
 let nextId = 1;
 
@@ -49,10 +52,39 @@ const initialState = () => ({
   texts: [newText()],
 });
 
+/* Presets embed their images as data URLs so one file restores the whole
+ * template — backdrop, vignette, overlays, text — onto next week's headshots.
+ * Overlays keep PNG for alpha; the backdrop drops to JPEG when it has none. */
+function toDataURL(img, type = 'image/png', quality) {
+  const c = document.createElement('canvas');
+  c.width = img.width;
+  c.height = img.height;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return c.toDataURL(type, quality);
+}
+
+function imageHasAlpha(img) {
+  const c = document.createElement('canvas');
+  const k = Math.min(1, 256 / Math.max(img.width, img.height));
+  c.width = Math.max(1, Math.round(img.width * k));
+  c.height = Math.max(1, Math.round(img.height * k));
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  const d = ctx.getImageData(0, 0, c.width, c.height).data;
+  for (let i = 3; i < d.length; i += 4) if (d[i] < 255) return true;
+  return false;
+}
+
+const fromDataURL = async (u) => createImageBitmap(await (await fetch(u)).blob());
+
 export default function Thumbnail({ path }) {
   const [state, setState] = useState(initialState);
   const [sel, setSel] = useState(null); // {kind:'subject'|'overlay'|'text'|'bg', id}
   const [cropId, setCropId] = useState(null);
+  const [tool, setTool] = useState(null); // {mode:'erase'|'add'}
+  const [brush, setBrush] = useState({ size: 42, feather: 0.5 });
+  const [brushPos, setBrushPos] = useState(null);
+  const [liveBox, setLiveBox] = useState(null); // crop box mid-drag
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [exportSize, setExportSize] = useState('1280x720');
@@ -63,15 +95,77 @@ export default function Thumbnail({ path }) {
   const canvasRef = useRef(null);
   const dragRef = useRef(null);
   const cropDragRef = useRef(null);
+  const paintRef = useRef(null);
   const recomposeRef = useRef(new Map());
   const presetRef = useRef(null);
 
+  /* ---- undo ----
+   *
+   * State is updated immutably, so history is a stack of state references —
+   * pushing one is free, and each entry keeps alive only the canvases it
+   * already pointed at. `commit(key)` is called before a change; repeats of
+   * the same key within a second coalesce, so a slider drag is one entry,
+   * while discrete actions pass coalesce=false to always get their own. */
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const undoRef = useRef([]);
+  const redoRef = useRef([]);
+  const commitMeta = useRef({ key: null, t: 0 });
+
+  const commit = useCallback((key, coalesce = true) => {
+    const now = Date.now();
+    if (coalesce && commitMeta.current.key === key && now - commitMeta.current.t < 1000) {
+      commitMeta.current.t = now;
+      return;
+    }
+    commitMeta.current = { key, t: now };
+    undoRef.current.push(stateRef.current);
+    if (undoRef.current.length > UNDO_LIMIT) undoRef.current.shift();
+    redoRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z') return;
+      e.preventDefault();
+      if (paintRef.current) return; // never mid-stroke
+      if (e.shiftKey) {
+        const next = redoRef.current.pop();
+        if (next) {
+          undoRef.current.push(stateRef.current);
+          setState(next);
+        }
+      } else {
+        const prev = undoRef.current.pop();
+        if (prev) {
+          redoRef.current.push(stateRef.current);
+          setState(prev);
+          commitMeta.current = { key: null, t: 0 };
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const cropSubject = cropId ? state.subjects.find((s) => s.id === cropId) : null;
+  const selectedSubject = sel?.kind === 'subject' ? state.subjects.find((s) => s.id === sel.id) : null;
+  const selectedOverlay = sel?.kind === 'overlay' ? state.overlays.find((o) => o.id === sel.id) : null;
+  const selSubId = selectedSubject?.id ?? null;
+  const painting = tool && selectedSubject;
+
+  // the brush is per-headshot work; changing target or entering crop drops it
+  useEffect(() => {
+    setTool(null);
+    setBrushPos(null);
+  }, [selSubId]);
 
   /* ---- draw ---- */
   const selectionRect = useCallback(
     (ctx) => {
-      if (!sel || cropId) return null;
+      if (!sel || cropId || tool) return null;
       const s = scaleFor(PREVIEW_W);
       if (sel.kind === 'subject') {
         const sub = state.subjects.find((x) => x.id === sel.id);
@@ -91,10 +185,8 @@ export default function Thumbnail({ path }) {
       if (!r || (r.w - PREVIEW_W < 1 && r.h - PREVIEW_H < 1)) return null;
       return r;
     },
-    [sel, cropId, state]
+    [sel, cropId, tool, state]
   );
-
-  const [liveBox, setLiveBox] = useState(null); // crop box mid-drag
 
   useEffect(() => {
     const cv = canvasRef.current;
@@ -108,10 +200,12 @@ export default function Thumbnail({ path }) {
         const frame = cropFrame(cropSubject, PREVIEW_W, PREVIEW_H);
         cropping = { id: cropSubject.id, frame, box: liveBox || frame.box };
       }
-      drawThumb(ctx, PREVIEW_W, PREVIEW_H, state, { selection: selectionRect(ctx), cropping });
+      const ring =
+        painting && brushPos ? { x: brushPos[0], y: brushPos[1], r: brush.size, feather: brush.feather, mode: tool.mode } : null;
+      drawThumb(ctx, PREVIEW_W, PREVIEW_H, state, { selection: selectionRect(ctx), cropping, brush: ring });
     });
     return () => cancelAnimationFrame(raf);
-  }, [state, fontsReady, selectionRect, cropSubject, liveBox]);
+  }, [state, fontsReady, selectionRect, cropSubject, liveBox, painting, brushPos, brush, tool]);
 
   /* ---- hit testing: text, overlays, cutouts front to back, then backdrop ---- */
   const pick = (px, py) => {
@@ -142,9 +236,46 @@ export default function Thumbnail({ path }) {
     return [((e.clientX - r.left) / r.width) * PREVIEW_W, ((e.clientY - r.top) / r.height) * PREVIEW_H];
   };
 
+  /* ---- touch-up painting ----
+   *
+   * Strokes live in source-image coordinates so they survive crops, matte
+   * changes and re-cuts. During the drag the recomposite runs on a throttle
+   * for live feedback; pointerup commits the stroke into state, which is what
+   * makes one stroke one undo entry. */
+  const recomposeWith = (s, strokes) =>
+    composeCutout(s.src, s.mask, s.matte, renderStrokes(strokes, s.src.width, s.src.height));
+
+  const paintTick = (force) => {
+    const P = paintRef.current;
+    if (!P) return;
+    const now = performance.now();
+    if (!force && now - P.last < 120) return;
+    P.last = now;
+    setState((st) => ({
+      ...st,
+      subjects: st.subjects.map((s) => (s.id === P.id ? { ...s, img: recomposeWith(s, [...s.strokes, P.stroke]) } : s)),
+    }));
+  };
+
   const onPointerDown = (e) => {
     const [px, py] = toCanvas(e);
     canvasRef.current.setPointerCapture(e.pointerId);
+    if (painting) {
+      const sub = selectedSubject;
+      const r = subjectRect(sub, PREVIEW_W, PREVIEW_H);
+      const sr = sourceRect(sub);
+      const toSrc = (x, y) => [sr.sx + ((x - r.x) / r.w) * sr.sw, sr.sy + ((y - r.y) / r.h) * sr.sh];
+      commit('stroke', false);
+      paintRef.current = {
+        id: sub.id,
+        toSrc,
+        last: 0,
+        stroke: { mode: tool.mode, size: (brush.size / r.w) * sr.sw, feather: brush.feather, points: [toSrc(px, py)] },
+      };
+      setBrushPos([px, py]);
+      paintTick(true);
+      return;
+    }
     if (cropSubject) {
       cropDragRef.current = { x: px, y: py };
       setLiveBox({ x: px, y: py, w: 0, h: 0 });
@@ -153,11 +284,24 @@ export default function Thumbnail({ path }) {
     const hit = pick(px, py);
     setSel(hit ? { kind: hit.kind, id: hit.id } : null);
     if (!hit) return;
-    dragRef.current = { hit, startX: px, startY: py };
+    dragRef.current = { hit, startX: px, startY: py, pushed: false };
   };
 
   const onPointerMove = (e) => {
     const [px, py] = toCanvas(e);
+    if (paintRef.current) {
+      const P = paintRef.current;
+      const p = P.toSrc(px, py);
+      const lp = P.stroke.points[P.stroke.points.length - 1];
+      if (Math.hypot(p[0] - lp[0], p[1] - lp[1]) > P.stroke.size * 0.15) P.stroke.points.push(p);
+      setBrushPos([px, py]);
+      paintTick();
+      return;
+    }
+    if (painting) {
+      setBrushPos([px, py]);
+      return;
+    }
     if (cropDragRef.current) {
       const a = cropDragRef.current;
       setLiveBox({ x: Math.min(a.x, px), y: Math.min(a.y, py), w: Math.abs(px - a.x), h: Math.abs(py - a.y) });
@@ -165,6 +309,12 @@ export default function Thumbnail({ path }) {
     }
     const d = dragRef.current;
     if (!d) return;
+    if (!d.pushed) {
+      // history entry on the first real move, so a bare click-to-select
+      // doesn't burn an undo step
+      commit(`drag:${d.hit.kind}:${d.hit.id ?? 'bg'}`, false);
+      d.pushed = true;
+    }
     const dx = px - d.startX;
     const dy = py - d.startY;
     setState((st) => {
@@ -202,6 +352,19 @@ export default function Thumbnail({ path }) {
     } catch {
       /* not captured */
     }
+    if (paintRef.current) {
+      const P = paintRef.current;
+      paintRef.current = null;
+      setState((st) => ({
+        ...st,
+        subjects: st.subjects.map((s) => {
+          if (s.id !== P.id) return s;
+          const strokes = [...s.strokes, P.stroke];
+          return { ...s, strokes, img: recomposeWith(s, strokes) };
+        }),
+      }));
+      return;
+    }
     if (cropDragRef.current) {
       cropDragRef.current = null;
       // ignore a click without a drag, so tapping the canvas doesn't wipe the crop
@@ -217,9 +380,10 @@ export default function Thumbnail({ path }) {
     const cv = canvasRef.current;
     if (!cv) return;
     const onWheel = (e) => {
-      if (!sel || sel.kind === 'text' || cropId) return;
+      if (!sel || sel.kind === 'text' || cropId || tool) return;
       e.preventDefault();
       const f = e.deltaY < 0 ? 1.03 : 1 / 1.03;
+      commit(`wheel:${sel.kind}:${sel.id ?? 'bg'}`);
       setState((st) => {
         if (sel.kind === 'subject')
           return { ...st, subjects: st.subjects.map((s) => (s.id === sel.id ? { ...s, scale: clamp(s.scale * f, 0.05, 4) } : s)) };
@@ -230,35 +394,39 @@ export default function Thumbnail({ path }) {
     };
     cv.addEventListener('wheel', onWheel, { passive: false });
     return () => cv.removeEventListener('wheel', onWheel);
-  }, [sel, cropId]);
+  }, [sel, cropId, tool, commit]);
 
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape' && cropId) return setCropId(null);
-      if (!sel || cropId || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'Escape') {
+        if (tool) return setTool(null);
+        if (cropId) return setCropId(null);
+        return;
+      }
+      if (!sel || cropId || tool || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       const step = e.shiftKey ? 0.02 : 0.004;
       const mv = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
       if (!mv) return;
       e.preventDefault();
+      commit(`nudge:${sel.kind}:${sel.id ?? 'bg'}`);
       const bump = (o) => ({ ...o, nx: o.nx + mv[0], ny: o.ny + mv[1] });
       setState((st) => {
-        if (sel.kind === 'subject')
-          return { ...st, subjects: st.subjects.map((s) => (s.id === sel.id ? bump(s) : s)) };
-        if (sel.kind === 'overlay')
-          return { ...st, overlays: st.overlays.map((o) => (o.id === sel.id ? bump(o) : o)) };
+        if (sel.kind === 'subject') return { ...st, subjects: st.subjects.map((s) => (s.id === sel.id ? bump(s) : s)) };
+        if (sel.kind === 'overlay') return { ...st, overlays: st.overlays.map((o) => (o.id === sel.id ? bump(o) : o)) };
         if (sel.kind === 'text') return { ...st, texts: st.texts.map((t) => (t.id === sel.id ? bump(t) : t)) };
         return { ...st, bg: { ...st.bg, nx: clamp(st.bg.nx + mv[0], 0, 1), ny: clamp(st.bg.ny + mv[1], 0, 1) } };
       });
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sel, cropId]);
+  }, [sel, cropId, tool, commit]);
 
   /* ---- crop ---- */
 
   /* Cropping keeps the kept region exactly where it was drawn: the new crop is
    * the box, so the subject's placement becomes the box outright. */
   const commitCrop = (box) => {
+    commit('crop', false);
     setState((st) => ({
       ...st,
       subjects: st.subjects.map((s) => {
@@ -275,7 +443,8 @@ export default function Thumbnail({ path }) {
     }));
   };
 
-  const resetCrop = (id) =>
+  const resetCrop = (id) => {
+    commit('crop-reset', false);
     setState((st) => ({
       ...st,
       subjects: st.subjects.map((s) => {
@@ -290,6 +459,7 @@ export default function Thumbnail({ path }) {
         };
       }),
     }));
+  };
 
   /* ---- cutouts ---- */
   const addHeadshots = async (files) => {
@@ -302,6 +472,7 @@ export default function Thumbnail({ path }) {
         const mask = await createImageBitmap(maskBlob);
         const matte = { ...DEFAULT_MATTE };
         const img = composeCutout(src, mask, matte);
+        commit('add-subject', false);
         setState((st) => {
           const z = st.subjects.length ? Math.max(...st.subjects.map((s) => s.z)) + 1 : 0;
           const n = st.subjects.length;
@@ -318,6 +489,8 @@ export default function Thumbnail({ path }) {
                 model,
                 matte,
                 img,
+                strokes: [],
+                adjust: { ...NEUTRAL_ADJUST },
                 crop: { ...FULL_CROP },
                 nx: n === 0 ? 0.22 : n === 1 ? 0.78 : 0.5,
                 ny: 0.62,
@@ -340,6 +513,7 @@ export default function Thumbnail({ path }) {
   /* Matte edits are a local recomposite, not another inference run, so the
    * slider stays live and only the pixel work is debounced. */
   const updMatte = (id, key, value) => {
+    commit(`matte:${id}:${key}`);
     setState((st) => ({
       ...st,
       subjects: st.subjects.map((s) => (s.id === id ? { ...s, matte: { ...s.matte, [key]: value } } : s)),
@@ -353,7 +527,7 @@ export default function Thumbnail({ path }) {
         recomposeRef.current.delete(id);
         setState((st) => ({
           ...st,
-          subjects: st.subjects.map((s) => (s.id === id ? { ...s, img: composeCutout(s.src, s.mask, s.matte) } : s)),
+          subjects: st.subjects.map((s) => (s.id === id ? { ...s, img: recomposeWith(s, s.strokes) } : s)),
         }));
       }, 140)
     );
@@ -366,10 +540,11 @@ export default function Thumbnail({ path }) {
       setStatus(`${sub.name} — re-cutting`);
       const maskBlob = await alphaMatte(sub.file, nextModel, (m) => setStatus(`${sub.name} — ${m}`));
       const mask = await createImageBitmap(maskBlob);
+      commit('recut', false);
       setState((st) => ({
         ...st,
         subjects: st.subjects.map((s) =>
-          s.id === sub.id ? { ...s, mask, model: nextModel, img: composeCutout(s.src, mask, s.matte) } : s
+          s.id === sub.id ? { ...s, mask, model: nextModel, img: recomposeWith({ ...s, mask }, s.strokes) } : s
         ),
       }));
       setStatus('');
@@ -381,17 +556,27 @@ export default function Thumbnail({ path }) {
   };
 
   const resetMatte = (id) => {
+    commit('matte-reset', false);
     setState((st) => ({
       ...st,
       subjects: st.subjects.map((s) =>
-        s.id === id ? { ...s, matte: { ...DEFAULT_MATTE }, img: composeCutout(s.src, s.mask, DEFAULT_MATTE) } : s
+        s.id === id ? { ...s, matte: { ...DEFAULT_MATTE }, img: recomposeWith({ ...s, matte: { ...DEFAULT_MATTE } }, s.strokes) } : s
       ),
+    }));
+  };
+
+  const clearStrokes = (id) => {
+    commit('clear-strokes', false);
+    setState((st) => ({
+      ...st,
+      subjects: st.subjects.map((s) => (s.id === id ? { ...s, strokes: [], img: composeCutout(s.src, s.mask, s.matte) } : s)),
     }));
   };
 
   /* ---- other images ---- */
   const addBackground = async ([file]) => {
     const img = await createImageBitmap(file);
+    commit('bg-image', false);
     setState((st) => ({ ...st, bg: { ...st.bg, img, name: file.name, zoom: 1, nx: 0.5, ny: 0.5 } }));
     setSel({ kind: 'bg' });
   };
@@ -399,6 +584,7 @@ export default function Thumbnail({ path }) {
   const addOverlays = async (files) => {
     for (const file of files) {
       const img = await createImageBitmap(file);
+      commit('add-overlay', false);
       setState((st) => ({
         ...st,
         overlays: [
@@ -441,9 +627,21 @@ export default function Thumbnail({ path }) {
   };
 
   const savePreset = () => {
-    const { bg, subjects, overlays, ...rest } = state;
-    const preset = { ...rest, bg: { ...bg, img: null } };
-    const blob = new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' });
+    const preset = {
+      version: 2,
+      bg: {
+        ...state.bg,
+        img: state.bg.img
+          ? imageHasAlpha(state.bg.img)
+            ? toDataURL(state.bg.img)
+            : toDataURL(state.bg.img, 'image/jpeg', 0.92)
+          : null,
+      },
+      vignette: state.vignette,
+      overlays: state.overlays.map((o) => ({ ...o, img: toDataURL(o.img) })),
+      texts: state.texts,
+    };
+    const blob = new Blob([JSON.stringify(preset)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'hcn-thumbnail-preset.json';
@@ -452,38 +650,76 @@ export default function Thumbnail({ path }) {
   };
 
   const loadPreset = async (file) => {
-    const preset = JSON.parse(await file.text());
-    setState((st) => ({
-      ...st,
-      ...preset,
-      bg: { ...st.bg, ...preset.bg, img: st.bg.img, name: st.bg.name },
-      subjects: st.subjects,
-      overlays: st.overlays,
-    }));
-    nextId = Math.max(nextId, ...(preset.texts || []).map((t) => t.id + 1));
+    try {
+      const p = JSON.parse(await file.text());
+      const bgImg = typeof p.bg?.img === 'string' ? await fromDataURL(p.bg.img) : null;
+      const overlays = Array.isArray(p.overlays)
+        ? (
+            await Promise.all(
+              p.overlays.map(async (o) => (typeof o.img === 'string' ? { ...o, id: nextId++, img: await fromDataURL(o.img) } : null))
+            )
+          ).filter(Boolean)
+        : null;
+      commit('preset', false);
+      setState((st) => ({
+        ...st,
+        bg: { ...st.bg, ...p.bg, img: bgImg ?? st.bg.img },
+        vignette: p.vignette ?? st.vignette,
+        overlays: overlays ?? st.overlays,
+        texts: Array.isArray(p.texts) ? p.texts.map((t) => ({ ...t, id: nextId++ })) : st.texts,
+        subjects: st.subjects,
+      }));
+      setStatus('');
+    } catch (err) {
+      setStatus(`Preset failed: ${err?.message || err}`);
+    }
   };
 
   /* ---- updates ---- */
-  const updBg = (key, value) => setState((st) => ({ ...st, bg: { ...st.bg, [key]: value } }));
-  const updVig = (key, value) => setState((st) => ({ ...st, vignette: { ...st.vignette, [key]: value } }));
-  const updSub = (id, key, value) =>
+  const updBg = (key, value) => {
+    commit(`bg:${key}`);
+    setState((st) => ({ ...st, bg: { ...st.bg, [key]: value } }));
+  };
+  const updVig = (key, value) => {
+    commit(`vig:${key}`);
+    setState((st) => ({ ...st, vignette: { ...st.vignette, [key]: value } }));
+  };
+  const updSub = (id, key, value) => {
+    commit(`sub:${id}:${key}`);
     setState((st) => ({ ...st, subjects: st.subjects.map((s) => (s.id === id ? { ...s, [key]: value } : s)) }));
-  const updOv = (id, key, value) =>
+  };
+  const updAdjust = (id, key, value) => {
+    commit(`adj:${id}:${key}`);
+    setState((st) => ({
+      ...st,
+      subjects: st.subjects.map((s) => (s.id === id ? { ...s, adjust: { ...s.adjust, [key]: value } } : s)),
+    }));
+  };
+  const updOv = (id, key, value) => {
+    commit(`ov:${id}:${key}`);
     setState((st) => ({ ...st, overlays: st.overlays.map((o) => (o.id === id ? { ...o, [key]: value } : o)) }));
-  const updGlow = (id, key, value) =>
+  };
+  const updGlow = (id, key, value) => {
+    commit(`glow:${id}:${key}`);
     setState((st) => ({
       ...st,
       subjects: st.subjects.map((s) => (s.id === id ? { ...s, glow: { ...s.glow, [key]: value } } : s)),
     }));
-  const updText = (id, key, value) =>
+  };
+  const updText = (id, key, value) => {
+    commit(`text:${id}:${key}`);
     setState((st) => ({ ...st, texts: st.texts.map((t) => (t.id === id ? { ...t, [key]: value } : t)) }));
-  const updHl = (id, key, value) =>
+  };
+  const updHl = (id, key, value) => {
+    commit(`hl:${id}:${key}`);
     setState((st) => ({
       ...st,
       texts: st.texts.map((t) => (t.id === id ? { ...t, highlight: { ...t.highlight, [key]: value } } : t)),
     }));
+  };
 
-  const reorder = (key, id, dir) =>
+  const reorder = (key, id, dir) => {
+    commit(`reorder:${key}:${id}`, false);
     setState((st) => {
       const byZ = [...st[key]].sort((a, b) => a.z - b.z);
       const i = byZ.findIndex((s) => s.id === id);
@@ -493,6 +729,13 @@ export default function Thumbnail({ path }) {
       const zmap = new Map(byZ.map((s, k) => [s.id, k]));
       return { ...st, [key]: st[key].map((s) => ({ ...s, z: zmap.get(s.id) })) };
     });
+  };
+
+  const removeFrom = (key, id) => {
+    commit(`rm:${key}`, false);
+    if (key === 'subjects') setCropId(null);
+    setState((st) => ({ ...st, [key]: st[key].filter((x) => x.id !== id) }));
+  };
 
   /* Drop a new block under the last one. Measured rather than offset by a
    * guess, because a two-line block at 104px is a third of the frame tall and
@@ -506,12 +749,11 @@ export default function Thumbnail({ path }) {
       if (L) ny = clamp((L.y + L.h) / PREVIEW_H + 0.02, 0, 0.9);
     }
     const t = newText({ text: 'The Truth!', ny, highlight: { on: true, color: '#f5232c', padX: 22, padY: 12, radius: 4 } });
+    commit('add-text', false);
     setState((st) => ({ ...st, texts: [...st.texts, t] }));
     setSel({ kind: 'text', id: t.id });
   };
 
-  const selectedSubject = sel?.kind === 'subject' ? state.subjects.find((s) => s.id === sel.id) : null;
-  const selectedOverlay = sel?.kind === 'overlay' ? state.overlays.find((o) => o.id === sel.id) : null;
   const subjectLayers = useMemo(() => [...state.subjects].sort((a, b) => b.z - a.z), [state.subjects]);
   const overlayLayers = useMemo(() => [...state.overlays].sort((a, b) => b.z - a.z), [state.overlays]);
   const v = state.vignette;
@@ -538,18 +780,21 @@ export default function Thumbnail({ path }) {
         <section className="stage">
           <canvas
             ref={canvasRef}
-            className={`card thumb${cropId ? ' cropping' : ''}`}
+            className={`card thumb${cropId ? ' cropping' : ''}${painting ? ' painting' : ''}`}
             style={{ aspectRatio: `${THUMB.W} / ${THUMB.H}` }}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
+            onPointerLeave={() => setBrushPos(null)}
           />
           <p className="hint">
             {status ||
-              (cropId
-                ? 'Crop mode — drag a box over the headshot. Esc or Done to finish.'
-                : 'Drag anything. Scroll to scale a selected item or zoom the background. Arrow keys nudge.')}
+              (painting
+                ? `${tool.mode === 'add' ? 'Restore' : 'Erase'} — paint on the headshot. Esc to finish, ⌘Z undoes a stroke.`
+                : cropId
+                  ? 'Crop mode — drag a box over the headshot. Esc or Done to finish.'
+                  : 'Drag anything. Scroll to scale. Arrow keys nudge. ⌘Z undoes.')}
           </p>
           {lastSize != null && (
             <p className={`hint ${oversize ? 'warn' : ''}`}>
@@ -570,7 +815,7 @@ export default function Thumbnail({ path }) {
           <Group title="Background">
             <DropZone label={state.bg.img ? `Replace — ${state.bg.name}` : 'Add background image'} onFiles={addBackground} />
             {state.bg.img && (
-              <button className="wide ghost" onClick={() => setState((st) => ({ ...st, bg: { ...st.bg, img: null, name: '' } }))}>
+              <button className="wide ghost" onClick={() => { commit('bg-image', false); setState((st) => ({ ...st, bg: { ...st.bg, img: null, name: '' } })); }}>
                 Remove image
               </button>
             )}
@@ -589,7 +834,7 @@ export default function Thumbnail({ path }) {
 
           <Group title="Vignette">
             <Slider label="All sides" value={allSides} min={0} max={1} step={0.01} fmt={(x) => `${Math.round(x * 100)}%`}
-              onChange={(x) => setState((st) => ({ ...st, vignette: { ...st.vignette, top: x, right: x, bottom: x, left: x } }))} />
+              onChange={(x) => { commit('vig:all'); setState((st) => ({ ...st, vignette: { ...st.vignette, top: x, right: x, bottom: x, left: x } })); }} />
             <Slider label="Top" value={v.top} min={0} max={1} step={0.01} onChange={(x) => updVig('top', x)} fmt={(x) => `${Math.round(x * 100)}%`} />
             <Slider label="Right" value={v.right} min={0} max={1} step={0.01} onChange={(x) => updVig('right', x)} fmt={(x) => `${Math.round(x * 100)}%`} />
             <Slider label="Bottom" value={v.bottom} min={0} max={1} step={0.01} onChange={(x) => updVig('bottom', x)} fmt={(x) => `${Math.round(x * 100)}%`} />
@@ -619,7 +864,7 @@ export default function Thumbnail({ path }) {
                   <span className="lbtns">
                     <button onClick={(e) => (e.stopPropagation(), reorder('subjects', s.id, 1))} title="Forward">↑</button>
                     <button onClick={(e) => (e.stopPropagation(), reorder('subjects', s.id, -1))} title="Back">↓</button>
-                    <button onClick={(e) => (e.stopPropagation(), setCropId(null), setState((st) => ({ ...st, subjects: st.subjects.filter((x) => x.id !== s.id) })))} title="Remove">×</button>
+                    <button onClick={(e) => (e.stopPropagation(), removeFrom('subjects', s.id))} title="Remove">×</button>
                   </span>
                 </li>
               ))}
@@ -628,11 +873,14 @@ export default function Thumbnail({ path }) {
               <>
                 <Slider label="Size" value={selectedSubject.scale} min={0.05} max={4} step={0.005} onChange={(x) => updSub(selectedSubject.id, 'scale', x)} fmt={(x) => `${Math.round(x * 100)}%`} />
                 <div className="seg">
-                  <button className={cropId === selectedSubject.id ? 'on' : ''} onClick={() => setCropId(cropId === selectedSubject.id ? null : selectedSubject.id)}>
+                  <button className={cropId === selectedSubject.id ? 'on' : ''} onClick={() => { setTool(null); setCropId(cropId === selectedSubject.id ? null : selectedSubject.id); }}>
                     {cropId === selectedSubject.id ? 'Done cropping' : 'Crop'}
                   </button>
                   <button onClick={() => resetCrop(selectedSubject.id)}>Reset crop</button>
                 </div>
+                <Slider label="Brightness" value={selectedSubject.adjust.brightness} min={0} max={2} step={0.01} onChange={(x) => updAdjust(selectedSubject.id, 'brightness', x)} fmt={(x) => `${Math.round(x * 100)}%`} />
+                <Slider label="Contrast" value={selectedSubject.adjust.contrast} min={0} max={2} step={0.01} onChange={(x) => updAdjust(selectedSubject.id, 'contrast', x)} fmt={(x) => `${Math.round(x * 100)}%`} />
+                <Slider label="Saturation" value={selectedSubject.adjust.saturation} min={0} max={2} step={0.01} onChange={(x) => updAdjust(selectedSubject.id, 'saturation', x)} fmt={(x) => `${Math.round(x * 100)}%`} />
                 <Row label="Glow">
                   <input type="checkbox" checked={selectedSubject.glow.on} onChange={(e) => updGlow(selectedSubject.id, 'on', e.target.checked)} />
                 </Row>
@@ -648,9 +896,9 @@ export default function Thumbnail({ path }) {
           </Group>
 
           {selectedSubject && (
-            <Group title={`Cutout edge — ${selectedSubject.name}`}>
+            <Group title={`Cutout edge — ${selectedSubject.name}`} defaultOpen={!!tool}>
               <p className="empty">
-                These recomposite the existing matte instantly. Raise hardness when a face goes half-transparent; shift
+                Edge sliders recomposite the existing matte instantly. Raise hardness when a face goes half-transparent; shift
                 inward and clean the edges when a rim of the old background survives.
               </p>
               <Slider label="Edge hardness" value={selectedSubject.matte.hardness} min={1} max={16} step={0.1} onChange={(x) => updMatte(selectedSubject.id, 'hardness', x)} fmt={(x) => `${x.toFixed(1)}×`} />
@@ -658,6 +906,31 @@ export default function Thumbnail({ path }) {
               <Slider label="Edge softness" value={selectedSubject.matte.softness} min={0} max={12} step={0.5} onChange={(x) => updMatte(selectedSubject.id, 'softness', x)} fmt={(x) => `${x}px`} />
               <Slider label="Clean edges" value={selectedSubject.matte.clean} min={0} max={3} step={1} onChange={(x) => updMatte(selectedSubject.id, 'clean', x)} fmt={(x) => (x ? `${x} pass` : 'off')} />
               <button className="wide ghost" onClick={() => resetMatte(selectedSubject.id)}>Reset edge</button>
+              <Segmented
+                label="Touch up"
+                value={tool?.mode || 'off'}
+                onChange={(m) => { setCropId(null); setTool(m === 'off' ? null : { mode: m }); }}
+                options={[
+                  { value: 'off', label: 'Off' },
+                  { value: 'erase', label: 'Erase' },
+                  { value: 'add', label: 'Restore' },
+                ]}
+              />
+              {tool && (
+                <>
+                  <Slider label="Brush size" value={brush.size} min={6} max={140} step={1} onChange={(x) => setBrush((b) => ({ ...b, size: x }))} fmt={(x) => `${x}px`} />
+                  <Slider label="Feather" value={brush.feather} min={0} max={0.95} step={0.01} onChange={(x) => setBrush((b) => ({ ...b, feather: x }))} fmt={(x) => `${Math.round(x * 100)}%`} />
+                  <p className="empty">
+                    Erase removes cutout the model kept wrongly; Restore paints the original photo back — for the hand the
+                    watch cut off, go over it with Restore. Each stroke is one ⌘Z step.
+                  </p>
+                </>
+              )}
+              {selectedSubject.strokes.length > 0 && (
+                <button className="wide ghost" onClick={() => clearStrokes(selectedSubject.id)}>
+                  Clear touch-ups ({selectedSubject.strokes.length})
+                </button>
+              )}
               <Row label="Re-cut with">
                 <select value={selectedSubject.model} onChange={(e) => recut(selectedSubject, e.target.value)} disabled={busy}>
                   {MODELS.map((m) => (
@@ -678,7 +951,7 @@ export default function Thumbnail({ path }) {
                   <span className="lbtns">
                     <button onClick={(e) => (e.stopPropagation(), reorder('overlays', o.id, 1))} title="Forward">↑</button>
                     <button onClick={(e) => (e.stopPropagation(), reorder('overlays', o.id, -1))} title="Back">↓</button>
-                    <button onClick={(e) => (e.stopPropagation(), setState((st) => ({ ...st, overlays: st.overlays.filter((x) => x.id !== o.id) })))} title="Remove">×</button>
+                    <button onClick={(e) => (e.stopPropagation(), removeFrom('overlays', o.id))} title="Remove">×</button>
                   </span>
                 </li>
               ))}
@@ -699,7 +972,7 @@ export default function Thumbnail({ path }) {
 
           {state.texts.map((t, i) => (
             <Group key={t.id} title={`Text ${i + 1}`}
-              right={<button className="x" title="Remove" onClick={() => setState((st) => ({ ...st, texts: st.texts.filter((x) => x.id !== t.id) }))}>×</button>}
+              right={<button className="x" title="Remove" onClick={() => removeFrom('texts', t.id)}>×</button>}
             >
               <textarea rows={2} value={t.text} placeholder="One line per row, or use ||"
                 onChange={(e) => updText(t.id, 'text', e.target.value)} onFocus={() => setSel({ kind: 'text', id: t.id })} />

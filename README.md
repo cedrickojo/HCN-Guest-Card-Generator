@@ -54,6 +54,15 @@ background image, vignette, cutouts, text.
   boundary in or out, *softness* feathers it, and *clean* pulls interior colour
   outward over a surviving background rim, one pixel per pass. Defaults are the
   identity transform, so an untouched import is exactly the model's own output.
+- **Touch-up brushes** — *Erase* removes cutout the model kept wrongly; *Restore*
+  paints the original photo back (the hand a watch strap severed, say), both with
+  a feather control. Strokes are stored as vectors in source coordinates, so they
+  survive crops, matte changes and re-cuts, and each stroke is one undo step.
+- **Undo** — ⌘Z / Ctrl+Z, ⇧⌘Z redoes. Covers drags, sliders, strokes, crops,
+  adds and removals; slider drags coalesce into one step.
+- **Per-headshot grade** — brightness, contrast and saturation per cutout, same
+  controls as the backdrop. Applied at draw time, so they cost nothing to change
+  and don't touch the matte.
 - **Cutout model** — the library's default is `isnet_fp16`; this tool asks for
   full-precision `isnet` instead, because half precision is where mattes fall
   apart on dark hair and dark skin against dark sets. Any placed headshot can be
@@ -84,6 +93,11 @@ there, so a clipboard image can't land in the wrong slot.
 Fonts are the two bundled brand faces plus Arial Black, Impact and the system
 sans. The latter three resolve on the designer's machine, so a thumbnail built
 on a Mac may set differently on a Windows box.
+
+Panel sections collapse (all closed by default — click a header). Presets embed
+the backdrop, vignette, overlays and text as one JSON file, images included as
+data URLs; headshots are deliberately excluded so a saved show template drops
+straight onto next week's guests.
 
 As with the cards, `drawThumb()` renders both the preview and the export, and
 its scale is strictly proportional to output width — text geometry is identical

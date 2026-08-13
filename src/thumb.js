@@ -243,6 +243,14 @@ function drawOverlays(ctx, W, H, overlays, front) {
   }
 }
 
+/** Same three controls as the backdrop, per headshot. Returns null when all
+ *  are neutral so the common case skips the filter entirely. */
+function subjectFilter(sub) {
+  const a = sub.adjust;
+  if (!a || (a.brightness === 1 && a.contrast === 1 && a.saturation === 1)) return null;
+  return `brightness(${a.brightness}) contrast(${a.contrast}) saturate(${a.saturation})`;
+}
+
 /* ---------- the thumbnail ---------- */
 
 export function drawThumb(ctx, W, H, state, opts = {}) {
@@ -255,17 +263,24 @@ export function drawThumb(ctx, W, H, state, opts = {}) {
 
   const cropping = opts.cropping;
   for (const sub of [...state.subjects].sort((a, b) => a.z - b.z)) {
+    const filt = subjectFilter(sub);
     if (cropping && cropping.id === sub.id) {
       // while cropping, the subject shows whole so you can see what you are
       // cutting away; the halo would only trace a silhouette about to change
       const f = cropping.frame.full;
+      ctx.save();
+      if (filt) ctx.filter = filt;
       ctx.drawImage(sub.img, f.x, f.y, f.w, f.h);
+      ctx.restore();
       continue;
     }
     const r = subjectRect(sub, W, H);
     if (sub.glow.on) drawGlow(ctx, sub, r, s);
     const { sx, sy, sw, sh } = sourceRect(sub);
+    ctx.save();
+    if (filt) ctx.filter = filt;
     ctx.drawImage(sub.img, sx, sy, sw, sh, r.x, r.y, r.w, r.h);
+    ctx.restore();
   }
 
   drawOverlays(ctx, W, H, state.overlays || [], false);
@@ -277,6 +292,26 @@ export function drawThumb(ctx, W, H, state, opts = {}) {
   drawOverlays(ctx, W, H, state.overlays || [], true);
 
   if (cropping) drawCropOverlay(ctx, W, H, cropping.box, s);
+
+  /* brush cursor — outer ring at full radius, dashed inner ring at the solid
+   * core so the feather band is visible before you commit a stroke */
+  if (opts.brush) {
+    const b = opts.brush;
+    ctx.save();
+    ctx.strokeStyle = b.mode === 'add' ? '#6fe08c' : '#ff655c';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.stroke();
+    if (b.feather > 0.02) {
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, Math.max(1, b.r * (1 - b.feather)), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
 
   /* selection affordance — preview only, never exported */
   if (opts.selection) {

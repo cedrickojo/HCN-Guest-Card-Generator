@@ -137,10 +137,12 @@ canvas.card.thumb {
 }
 
 .group h2 .x {
-  float: right;
   padding: 0 7px;
   line-height: 1.3;
-  margin-top: -3px;
+}
+
+canvas.card.painting {
+  cursor: none;
 }
 
 .hint {
@@ -179,6 +181,31 @@ canvas.card.thumb {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--dim);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.group h2:hover {
+  color: var(--text);
+}
+
+.gtitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tog {
+  font-size: 14px;
+  line-height: 1;
+  width: 16px;
+  text-align: center;
+  flex: none;
 }
 
 .row {

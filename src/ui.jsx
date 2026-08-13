@@ -33,14 +33,19 @@ export function useBrandFonts() {
   return ready;
 }
 
-export function Group({ title, right, children }) {
+/* Sections collapse to keep the panel scannable; everything starts closed.
+ * The whole header is the toggle; `right` (e.g. a remove button) stops
+ * propagation so it doesn't double as one. */
+export function Group({ title, right, children, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <section className="group">
-      <h2>
-        {title}
-        {right}
+      <h2 className="ghead" onClick={() => setOpen((o) => !o)}>
+        <span className="gtitle">{title}</span>
+        {right && <span className="gright" onClick={(e) => e.stopPropagation()}>{right}</span>}
+        <span className="tog" aria-hidden="true">{open ? '−' : '+'}</span>
       </h2>
-      {children}
+      {open && children}
     </section>
   );
 }
