@@ -16,6 +16,7 @@ import {
   textLayout,
 } from './thumb.js';
 import { DEFAULT_MODEL, MODELS, alphaMatte } from './removeBg.js';
+import { cloudEnhance, cloudStatus } from './enhance.js';
 import { DEFAULT_MATTE, composeCutout, renderStrokes } from './matte.js';
 import { ColorRow, DropZone, Group, Row, Segmented, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
 import { Tabs } from './router.jsx';
@@ -91,6 +92,26 @@ export default function Thumbnail({ path }) {
   const [format, setFormat] = useState('png');
   const [lastSize, setLastSize] = useState(null);
   const [model, setModel] = useState(DEFAULT_MODEL);
+  const [cloud, setCloud] = useState({ configured: false });
+  const [engine, setEngine] = useState(() => {
+    try {
+      return localStorage.getItem('hcn.engine') || 'browser';
+    } catch {
+      return 'browser';
+    }
+  });
+  const [cloudUpscale, setCloudUpscale] = useState(true);
+  useEffect(() => {
+    cloudStatus().then(setCloud);
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem('hcn.engine', engine);
+    } catch {
+      /* storage blocked */
+    }
+  }, [engine]);
+  const useCloud = engine === 'cloud' && cloud.configured;
   const fontsReady = useBrandFonts();
   const canvasRef = useRef(null);
   const dragRef = useRef(null);
@@ -529,9 +550,23 @@ export default function Thumbnail({ path }) {
     try {
       for (const file of files) {
         setStatus(`${file.name} — starting`);
-        const src = await createImageBitmap(file);
-        const maskBlob = await alphaMatte(file, model, (m) => setStatus(`${file.name} — ${m}`));
-        const mask = await createImageBitmap(maskBlob);
+        let src;
+        let mask;
+        let usedModel = model;
+        if (useCloud) {
+          // the website's pipeline: Topaz then Bria on fal. The cut-out's alpha
+          // IS the matte, so every edge slider and brush works on it exactly as
+          // on a browser cut; Restore paints back from the upscaled frame.
+          const r = await cloudEnhance(file, { upscale: cloudUpscale, removeBackground: true }, (m) => setStatus(`${file.name} — ${m}`));
+          if (!r.cutout) throw new Error('the cloud returned no cut-out');
+          src = r.upscaled || (await createImageBitmap(file));
+          mask = r.cutout;
+          usedModel = 'cloud';
+        } else {
+          src = await createImageBitmap(file);
+          const maskBlob = await alphaMatte(file, model, (m) => setStatus(`${file.name} — ${m}`));
+          mask = await createImageBitmap(maskBlob);
+        }
         const matte = { ...DEFAULT_MATTE };
         const img = composeCutout(src, mask, matte);
         commit('add-subject', false);
@@ -548,7 +583,7 @@ export default function Thumbnail({ path }) {
                 file,
                 src,
                 mask,
-                model,
+                model: usedModel,
                 matte,
                 img,
                 strokes: [],
@@ -603,8 +638,16 @@ export default function Thumbnail({ path }) {
     setBusy(true);
     try {
       setStatus(`${sub.name} — re-cutting`);
-      const maskBlob = await alphaMatte(sub.file, nextModel, (m) => setStatus(`${sub.name} — ${m}`));
-      const mask = await createImageBitmap(maskBlob);
+      let mask;
+      if (nextModel === 'cloud') {
+        // re-cut what is already there (upscaled, if it was) — no second upscale bill
+        const r = await cloudEnhance(sub.src, { upscale: false, removeBackground: true }, (m) => setStatus(`${sub.name} — ${m}`));
+        if (!r.cutout) throw new Error('the cloud returned no cut-out');
+        mask = r.cutout;
+      } else {
+        const maskBlob = await alphaMatte(sub.file, nextModel, (m) => setStatus(`${sub.name} — ${m}`));
+        mask = await createImageBitmap(maskBlob);
+      }
       commit('recut', false);
       setState((st) => ({
         ...st,
@@ -912,14 +955,32 @@ export default function Thumbnail({ path }) {
           </Group>
 
           <Group title="Headshots">
-            <Row label="Cutout model">
-              <select value={model} onChange={(e) => setModel(e.target.value)}>
-                {MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>{m.label}</option>
-                ))}
-              </select>
-            </Row>
-            <p className="empty">{MODELS.find((m) => m.id === model)?.note}. Applies to new headshots; use Re-cut below to change one already placed.</p>
+            {cloud.configured && (
+              <Segmented label="Cutout engine" value={engine} onChange={setEngine}
+                options={[{ value: 'browser', label: 'In browser' }, { value: 'cloud', label: 'Cloud (fal)' }]} />
+            )}
+            {useCloud ? (
+              <>
+                <Row label="Upscale first">
+                  <input type="checkbox" checked={cloudUpscale} onChange={(e) => setCloudUpscale(e.target.checked)} />
+                </Row>
+                <p className="empty">
+                  The website's pipeline: Topaz Gigapixel ($0.08) then Bria RMBG 2.0 ($0.018) per headshot, billed to the fal
+                  account. Best edges, and it runs on the server so nothing downloads here.
+                </p>
+              </>
+            ) : (
+              <>
+                <Row label="Cutout model">
+                  <select value={model} onChange={(e) => setModel(e.target.value)}>
+                    {MODELS.map((m) => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </select>
+                </Row>
+                <p className="empty">{MODELS.find((m) => m.id === model)?.note}. Applies to new headshots; use Re-cut below to change one already placed.</p>
+              </>
+            )}
             <DropZone label={busy ? 'Working…' : 'Add headshots'} multiple disabled={busy} onFiles={addHeadshots} />
             {subjectLayers.length === 0 && <p className="empty">Backgrounds come off on import, nothing else is applied.</p>}
             <ul className="layers">
@@ -1001,6 +1062,7 @@ export default function Thumbnail({ path }) {
                   {MODELS.map((m) => (
                     <option key={m.id} value={m.id}>{m.label}</option>
                   ))}
+                  {cloud.configured && <option value="cloud">Cloud — Bria RMBG 2.0 ($0.018)</option>}
                 </select>
               </Row>
             </Group>

@@ -11,5 +11,8 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'credentialless',
     },
+    // `vite dev` has no /api; point API_PROXY at `vercel dev` (or a mock) to
+    // exercise the cloud enhance path locally. Unset, /api simply 404s.
+    proxy: process.env.API_PROXY ? { '/api': { target: process.env.API_PROXY, changeOrigin: true } } : undefined,
   },
 });

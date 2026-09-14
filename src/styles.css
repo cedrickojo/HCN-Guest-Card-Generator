@@ -6,6 +6,16 @@
   font-family: 'F37Analog';
   src: url('/assets/F37Analog-SemiBold.otf');
 }
+@font-face {
+  font-family: 'Archivo';
+  font-weight: 100 900;
+  src: url('/assets/Archivo-Variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Doto';
+  font-weight: 100 900;
+  src: url('/assets/Doto-Variable.woff2') format('woff2');
+}
 
 :root {
   --ink: #0f0e13;

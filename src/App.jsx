@@ -8,51 +8,44 @@ import {
   plateRect,
   scaleFor,
   subjectRect,
-  textRect,
+  textRect as classicTextRect,
   trimLogo,
 } from './card.js';
+import { PALETTES, WEB_DEFAULTS, WEB_TEXT, drawWebCard, exportWebPng, textRect as webTextRect } from './webcard.js';
 import { cutout } from './removeBg.js';
-import { DropZone, Group, Row, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
+import { cloudEnhance, cloudStatus } from './enhance.js';
+import { ColorRow, DropZone, Group, Row, Segmented, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
 import { Tabs } from './router.jsx';
 
 const MAX_PREVIEW = 820;
 
-function defaultText(ar) {
+/* Two styles share one state shape. The classic layout comes from the
+ * skill's PSD; the website layout reads off makeCard() in the site's
+ * index.html, whose numbers are in a 900-wide frame — `k` converts. */
+function defaultText(ar, style = 'classic') {
   const [W, H] = ASPECTS[ar];
   const s = scaleFor(W, H);
+  if (style === 'web') {
+    const k = W / 900;
+    return {
+      eyebrow: { show: true, text: 'EP 01', size: WEB_TEXT.eyebrow.size, nx: (40 * k) / W, ny: (40 * k) / H, align: 'left', font: 'chip', upper: true },
+      name: { show: true, text: 'Guest Name', size: WEB_TEXT.name.size, nx: (40 * k) / W, ny: 1 - (142 * k) / H, align: 'left', font: 'display', upper: false },
+      title: { show: true, text: 'Title, Company', size: WEB_TEXT.title.size, nx: (40 * k) / W, ny: 1 - (73 * k) / H, align: 'left', font: 'display', upper: false },
+    };
+  }
   const bottom = H - REF.MARGIN * s;
   return {
-    eyebrow: {
-      show: true,
-      text: "NEXT WEEK'S GUEST:",
-      size: REF.EYEBROW_SIZE,
-      nx: 0.5,
-      ny: (bottom - REF.EYEBROW_DY * s) / H,
-      align: 'center',
-      font: 'mono',
-      upper: false,
-    },
-    name: {
-      show: true,
-      text: 'Guest Name',
-      size: REF.NAME_SIZE,
-      nx: 0.5,
-      ny: (bottom - REF.NAME_DY * s) / H,
-      align: 'center',
-      font: 'display',
-      upper: true,
-    },
-    title: {
-      show: true,
-      text: 'Title | Company',
-      size: REF.TITLE_SIZE,
-      nx: 0.5,
-      ny: (bottom - REF.TITLE_DY * s) / H,
-      align: 'center',
-      font: 'mono',
-      upper: false,
-    },
+    eyebrow: { show: true, text: "NEXT WEEK'S GUEST:", size: REF.EYEBROW_SIZE, nx: 0.5, ny: (bottom - REF.EYEBROW_DY * s) / H, align: 'center', font: 'mono', upper: false },
+    name: { show: true, text: 'Guest Name', size: REF.NAME_SIZE, nx: 0.5, ny: (bottom - REF.NAME_DY * s) / H, align: 'center', font: 'display', upper: true },
+    title: { show: true, text: 'Title | Company', size: REF.TITLE_SIZE, nx: 0.5, ny: (bottom - REF.TITLE_DY * s) / H, align: 'center', font: 'mono', upper: false },
   };
+}
+
+function defaultScrim(ar, style = 'classic') {
+  if (style !== 'web') return { max: REF.SCRIM_MAX, top: REF.SCRIM_TOP, full: REF.SCRIM_FULL, falloff: REF.SCRIM_FALLOFF };
+  // the site fades to the backdrop over the bottom third, reaching 94%
+  const [W, H] = ASPECTS[ar];
+  return { max: 0.94, top: Math.round((0.34 * H) / scaleFor(W, H)), full: 0, falloff: 1 };
 }
 
 function defaultLogo(ar) {
@@ -72,14 +65,16 @@ function defaultLogo(ar) {
 
 const initialState = (ar = '3:4') => ({
   ar,
+  style: 'classic',
   color: '#FF6555',
+  web: { ...WEB_DEFAULTS },
   subjects: [],
   text: defaultText(ar),
   logo: defaultLogo(ar),
-  scrim: { max: REF.SCRIM_MAX, top: REF.SCRIM_TOP, full: REF.SCRIM_FULL, falloff: REF.SCRIM_FALLOFF },
+  scrim: defaultScrim(ar),
 });
 
-const SCRIM_DEFAULTS = { max: REF.SCRIM_MAX, top: REF.SCRIM_TOP, full: REF.SCRIM_FULL, falloff: REF.SCRIM_FALLOFF };
+const SCRIM_DEFAULTS = defaultScrim('3:4');
 
 let nextId = 1;
 
@@ -89,15 +84,37 @@ export default function App({ path }) {
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState(null); // {kind:'subject'|'text'|'logo', id|key}
+  const [cloud, setCloud] = useState({ configured: false });
+  const [engine, setEngine] = useState(() => {
+    try {
+      return localStorage.getItem('hcn.engine') || 'browser';
+    } catch {
+      return 'browser';
+    }
+  });
+  const [cloudUpscale, setCloudUpscale] = useState(true);
   const canvasRef = useRef(null);
   const dragRef = useRef(null);
   const presetRef = useRef(null);
 
   const fontsReady = useBrandFonts();
+  const isWeb = state.style === 'web';
+  const useCloud = engine === 'cloud' && cloud.configured;
 
   const [W, H] = ASPECTS[state.ar];
   const previewW = W >= H ? MAX_PREVIEW : Math.round((MAX_PREVIEW * W) / H);
   const previewH = Math.round((previewW * H) / W);
+
+  useEffect(() => {
+    cloudStatus().then(setCloud);
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem('hcn.engine', engine);
+    } catch {
+      /* storage blocked */
+    }
+  }, [engine]);
 
   /* ---- assets + fonts ---- */
   useEffect(() => {
@@ -114,6 +131,12 @@ export default function App({ path }) {
     })();
   }, []);
 
+  /* ---- style-aware geometry ---- */
+  const textRect = useCallback(
+    (ctx, key, w, h, s) => (isWeb ? webTextRect(ctx, state.text[key], w, h, s, key) : classicTextRect(ctx, state.text[key], w, h, s)),
+    [isWeb, state.text]
+  );
+
   /* ---- draw ---- */
   const selectionRect = useCallback(
     (ctx) => {
@@ -123,12 +146,10 @@ export default function App({ path }) {
         const sub = state.subjects.find((x) => x.id === sel.id);
         return sub ? subjectRect(sub, previewW, previewH) : null;
       }
-      if (sel.kind === 'text') {
-        return textRect(ctx, state.text[sel.key], previewW, previewH, s);
-      }
+      if (sel.kind === 'text') return textRect(ctx, sel.key, previewW, previewH, s);
       return plateRect(state.logo, previewW, previewH, s);
     },
-    [sel, state, previewW, previewH]
+    [sel, state, previewW, previewH, textRect]
   );
 
   useEffect(() => {
@@ -139,17 +160,18 @@ export default function App({ path }) {
     cv.height = previewH;
     const ctx = cv.getContext('2d');
     const raf = requestAnimationFrame(() => {
-      drawCard(ctx, previewW, previewH, state, assets, { selection: selectionRect(ctx) });
+      const draw = isWeb ? drawWebCard : drawCard;
+      draw(ctx, previewW, previewH, state, assets, { selection: selectionRect(ctx) });
     });
     return () => cancelAnimationFrame(raf);
-  }, [state, assets, fontsReady, previewW, previewH, selectionRect]);
+  }, [state, assets, fontsReady, previewW, previewH, selectionRect, isWeb]);
 
   /* ---- hit testing ---- */
   const pick = (px, py) => {
     const ctx = canvasRef.current.getContext('2d');
     const s = scaleFor(previewW, previewH);
     for (const key of ['title', 'name', 'eyebrow']) {
-      const r = textRect(ctx, state.text[key], previewW, previewH, s);
+      const r = textRect(ctx, key, previewW, previewH, s);
       if (r && px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
         return { kind: 'text', key, ref: { nx: state.text[key].nx, ny: state.text[key].ny } };
       }
@@ -186,17 +208,11 @@ export default function App({ path }) {
     const d = dragRef.current;
     if (!d) return;
     const [px, py] = toCanvas(e);
-    const dnx = (px - d.startX) / previewW;
-    const dny = (py - d.startY) / previewH;
-    const nx = d.ref.nx + dnx;
-    const ny = d.ref.ny + dny;
+    const nx = d.ref.nx + (px - d.startX) / previewW;
+    const ny = d.ref.ny + (py - d.startY) / previewH;
     setState((st) => {
-      if (d.hit.kind === 'subject') {
-        return { ...st, subjects: st.subjects.map((s) => (s.id === d.hit.id ? { ...s, nx, ny } : s)) };
-      }
-      if (d.hit.kind === 'text') {
-        return { ...st, text: { ...st.text, [d.hit.key]: { ...st.text[d.hit.key], nx, ny } } };
-      }
+      if (d.hit.kind === 'subject') return { ...st, subjects: st.subjects.map((s) => (s.id === d.hit.id ? { ...s, nx, ny } : s)) };
+      if (d.hit.kind === 'text') return { ...st, text: { ...st.text, [d.hit.key]: { ...st.text[d.hit.key], nx, ny } } };
       return { ...st, logo: { ...st.logo, nx, ny } };
     });
   };
@@ -245,7 +261,21 @@ export default function App({ path }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [sel]);
 
-  /* ---- adding images ---- */
+  /* ---- adding images ----
+   *
+   * Every subject keeps `raw` (the cut-out as delivered) and `img` (the PSD
+   * grade applied): the classic style draws the grade, the website style
+   * draws the raw cut-out, as the site does. */
+  const cutoutFor = async (file, name) => {
+    if (useCloud) {
+      const r = await cloudEnhance(file, { upscale: cloudUpscale, removeBackground: true }, (m) => setStatus(`${name} — ${m}`));
+      if (!r.cutout) throw new Error('the cloud returned no cut-out');
+      return r.cutout;
+    }
+    const blob = await cutout(file, (m) => setStatus(`${name} — ${m}`));
+    return createImageBitmap(blob);
+  };
+
   const addHeadshots = async (files) => {
     setBusy(true);
     try {
@@ -253,16 +283,15 @@ export default function App({ path }) {
       for (let i = 0; i < list.length; i++) {
         const file = list[i];
         setStatus(`${file.name} — starting`);
-        if (file.size > 0 && Math.min(...(await dims(file))) < 500) {
+        if (file.size > 0 && Math.min(...(await dims(file))) < 500 && !useCloud) {
           setStatus(`${file.name} — low resolution, will look soft at full size`);
         }
-        const blob = await cutout(file, (m) => setStatus(`${file.name} — ${m}`));
-        const bmp = await createImageBitmap(blob);
-        const graded = gradeCutout(bmp);
+        const raw = await cutoutFor(file, file.name);
+        const graded = gradeCutout(raw);
         setState((st) => {
           const z = st.subjects.length ? Math.max(...st.subjects.map((s) => s.z)) + 1 : 0;
           const n = st.subjects.length;
-          const scale = 0.62;
+          const web = st.style === 'web';
           return {
             ...st,
             subjects: [
@@ -270,10 +299,13 @@ export default function App({ path }) {
               {
                 id: nextId++,
                 name: file.name,
+                file,
+                raw,
                 img: graded,
                 nx: n === 0 ? 0.5 : 0.5 + (n % 2 === 1 ? -0.16 : 0.16) * Math.ceil(n / 2),
-                ny: 0.66,
-                scale,
+                // the site seats a full-width square photo 6% down the card
+                ny: web ? 0.435 : 0.66,
+                scale: web ? 0.75 : 0.62,
                 z,
               },
             ],
@@ -283,6 +315,26 @@ export default function App({ path }) {
       setStatus('');
     } catch (err) {
       setStatus(`Cutout failed: ${err?.message || err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Re-run one placed headshot through the website's pipeline. */
+  const enhanceSubject = async (sub, upscale) => {
+    setBusy(true);
+    try {
+      const source = sub.file || sub.raw;
+      const r = await cloudEnhance(source, { upscale, removeBackground: true }, (m) => setStatus(`${sub.name} — ${m}`));
+      if (!r.cutout) throw new Error('the cloud returned no cut-out');
+      const graded = gradeCutout(r.cutout);
+      setState((st) => ({
+        ...st,
+        subjects: st.subjects.map((s) => (s.id === sub.id ? { ...s, raw: r.cutout, img: graded } : s)),
+      }));
+      setStatus(r.steps.join(' · '));
+    } catch (err) {
+      setStatus(`Enhance failed: ${err?.message || err}`);
     } finally {
       setBusy(false);
     }
@@ -300,10 +352,10 @@ export default function App({ path }) {
     setBusy(true);
     setStatus('Rendering full size');
     try {
-      const blob = await exportPng(state, assets, state.ar);
+      const blob = isWeb ? await exportWebPng(state, assets, state.ar, ASPECTS) : await exportPng(state, assets, state.ar);
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `${slug(state.text.name.text) || 'hcn-card'}-${state.ar.replace(':', 'x')}.png`;
+      a.download = `${slug(state.text.name.text) || 'hcn-card'}-${state.style}-${state.ar.replace(':', 'x')}.png`;
       a.click();
       URL.revokeObjectURL(a.href);
       setStatus('');
@@ -330,6 +382,8 @@ export default function App({ path }) {
     setState((st) => ({
       ...st,
       ...preset,
+      style: preset.style === 'web' ? 'web' : 'classic',
+      web: { ...WEB_DEFAULTS, ...preset.web },
       // presets saved before the scrim gained depth/falloff only carry max+top
       scrim: { ...SCRIM_DEFAULTS, ...preset.scrim },
       subjects: st.subjects,
@@ -337,10 +391,22 @@ export default function App({ path }) {
     }));
   };
 
+  /* Switching style re-templates text and scrim — the two layouts share
+   * nothing, so carrying positions across would just be wrong. Headshots
+   * stay where they are. The site's cards are 4:5; the classic default 3:4
+   * follows it across, any other ratio is a choice and is kept. */
+  const setStyle = (style) =>
+    setState((st) => {
+      if (st.style === style) return st;
+      const ar = style === 'web' && st.ar === '3:4' ? '4:5' : style === 'classic' && st.ar === '4:5' ? '3:4' : st.ar;
+      return { ...st, style, ar, text: defaultText(ar, style), scrim: defaultScrim(ar, style) };
+    });
+
   const upd = (path, value) =>
     setState((st) => {
       if (path[0] === 'text') return { ...st, text: { ...st.text, [path[1]]: { ...st.text[path[1]], [path[2]]: value } } };
       if (path[0] === 'logo') return { ...st, logo: { ...st.logo, [path[1]]: value } };
+      if (path[0] === 'web') return { ...st, web: { ...st.web, [path[1]]: value } };
       if (path[0] === 'scrim') {
         const scrim = { ...st.scrim, [path[1]]: value };
         // the solid band lives inside the total height — pulling `top` down drags `full` with it
@@ -349,6 +415,8 @@ export default function App({ path }) {
       }
       return { ...st, [path[0]]: value };
     });
+
+  const setPalette = (i) => setState((st) => ({ ...st, web: { ...st.web, palette: i, ...PALETTES[i] } }));
 
   const updSubject = (id, key, value) =>
     setState((st) => ({ ...st, subjects: st.subjects.map((s) => (s.id === id ? { ...s, [key]: value } : s)) }));
@@ -366,12 +434,16 @@ export default function App({ path }) {
 
   const selectedSubject = sel?.kind === 'subject' ? state.subjects.find((s) => s.id === sel.id) : null;
   const layerOrder = useMemo(() => [...state.subjects].sort((a, b) => b.z - a.z), [state.subjects]);
+  const web = { ...WEB_DEFAULTS, ...state.web };
+  const lineLabels = isWeb
+    ? { eyebrow: 'EP chip', name: 'name', title: 'title, company' }
+    : { eyebrow: 'announcement', name: 'headline', title: 'credit' };
 
   return (
     <div className="app">
       <header>
         <div className="mark">
-          <span className="dot" style={{ background: state.color }} />
+          <span className="dot" style={{ background: isWeb ? web.glow : state.color }} />
           HCN CARD STUDIO
         </div>
         <Tabs path={path} />
@@ -402,7 +474,9 @@ export default function App({ path }) {
         </section>
 
         <aside className="panel">
-          <Group title="Card">
+          <Group title="Card" defaultOpen>
+            <Segmented label="Style" value={state.style} onChange={setStyle}
+              options={[{ value: 'classic', label: 'Classic' }, { value: 'web', label: 'Website' }]} />
             <Row label="Aspect ratio">
               <select value={state.ar} onChange={(e) => upd(['ar'], e.target.value)}>
                 {Object.keys(ASPECTS).map((k) => (
@@ -412,13 +486,35 @@ export default function App({ path }) {
                 ))}
               </select>
             </Row>
-            <Row label="Accent">
-              <div className="colorline">
-                <input type="color" value={state.color} onChange={(e) => upd(['color'], e.target.value)} />
-                <input className="hex" value={state.color} onChange={(e) => upd(['color'], e.target.value)} />
-              </div>
-            </Row>
+            {!isWeb && <ColorRow label="Accent" value={state.color} onChange={(hex) => upd(['color'], hex)} />}
           </Group>
+
+          {isWeb && (
+            <Group title="Website look" defaultOpen>
+              <Row label="Palette">
+                <select value={web.palette} onChange={(e) => setPalette(Number(e.target.value))}>
+                  {PALETTES.map((p, i) => (
+                    <option key={p.name} value={i}>{p.name}</option>
+                  ))}
+                </select>
+              </Row>
+              <ColorRow label="Backdrop" value={web.bg} onChange={(hex) => upd(['web', 'bg'], hex)} />
+              <ColorRow label="Glow" value={web.glow} onChange={(hex) => upd(['web', 'glow'], hex)} />
+              <ColorRow label="Type" value={web.ink} onChange={(hex) => upd(['web', 'ink'], hex)} />
+              <ColorRow label="Chip" value={web.chip} onChange={(hex) => upd(['web', 'chip'], hex)} />
+              <Slider label="Glow strength" value={web.glowStrength} min={0} max={1} step={0.01} onChange={(v) => upd(['web', 'glowStrength'], v)} fmt={(v) => `${Math.round(v * 100)}%`} />
+              <Row label="Halftone dots">
+                <input type="checkbox" checked={web.halftone} onChange={(e) => upd(['web', 'halftone'], e.target.checked)} />
+              </Row>
+              <Row label="Headshot shadow">
+                <input type="checkbox" checked={web.shadow} onChange={(e) => upd(['web', 'shadow'], e.target.checked)} />
+              </Row>
+              <Row label="HCN mark">
+                <input type="checkbox" checked={web.mark} onChange={(e) => upd(['web', 'mark'], e.target.checked)} />
+              </Row>
+              <p className="empty">The glow and the halftone centre on the front headshot's head, as the site's do.</p>
+            </Group>
+          )}
 
           <Group title="Bottom gradient">
             <Slider label="Darkness" value={state.scrim.max} min={0} max={1} step={0.01} onChange={(v) => upd(['scrim', 'max'], v)} fmt={(v) => `${Math.round(v * 100)}%`} />
@@ -427,11 +523,26 @@ export default function App({ path }) {
             <Slider label="Falloff" value={state.scrim.falloff} min={0.2} max={4} step={0.05} onChange={(v) => upd(['scrim', 'falloff'], v)} fmt={(v) => v.toFixed(2)} />
             <p className="empty">
               Height is the whole gradient, depth the solid band at the base — both measured up from the card edge.
-              Falloff below 1 fades early and lingers dark; above 1 holds clear then drops fast.
+              {isWeb ? ' In the website style the gradient is the backdrop colour, as on the site.' : ' Falloff below 1 fades early and lingers dark; above 1 holds clear then drops fast.'}
             </p>
           </Group>
 
-          <Group title="Headshots">
+          <Group title="Headshots" defaultOpen>
+            {cloud.configured && (
+              <Segmented label="Cutout engine" value={engine} onChange={setEngine}
+                options={[{ value: 'browser', label: 'In browser' }, { value: 'cloud', label: 'Cloud (fal)' }]} />
+            )}
+            {useCloud && (
+              <>
+                <Row label="Upscale first">
+                  <input type="checkbox" checked={cloudUpscale} onChange={(e) => setCloudUpscale(e.target.checked)} />
+                </Row>
+                <p className="empty">
+                  The website's pipeline: Topaz Gigapixel ($0.08) then Bria RMBG 2.0 ($0.018) per headshot, billed to the fal
+                  account. Cleaner edges than the in-browser model, and it runs on the server.
+                </p>
+              </>
+            )}
             <DropZone label={busy ? 'Working…' : 'Add headshots'} multiple disabled={busy} onFiles={addHeadshots} />
             {layerOrder.length === 0 && <p className="empty">Add a headshot to start. Backgrounds come off automatically.</p>}
             <ul className="layers">
@@ -447,12 +558,24 @@ export default function App({ path }) {
               ))}
             </ul>
             {selectedSubject && (
-              <Slider label="Size" value={selectedSubject.scale} min={0.05} max={2} step={0.005} onChange={(v) => updSubject(selectedSubject.id, 'scale', v)} fmt={(v) => `${Math.round(v * 100)}%`} />
+              <>
+                <Slider label="Size" value={selectedSubject.scale} min={0.05} max={2} step={0.005} onChange={(v) => updSubject(selectedSubject.id, 'scale', v)} fmt={(v) => `${Math.round(v * 100)}%`} />
+                {cloud.configured && (
+                  <div className="seg">
+                    <button disabled={busy} onClick={() => enhanceSubject(selectedSubject, true)} title="Topaz upscale, then Bria cut-out — $0.10">
+                      Enhance in cloud
+                    </button>
+                    <button disabled={busy} onClick={() => enhanceSubject(selectedSubject, false)} title="Bria cut-out only — $0.018">
+                      Re-cut in cloud
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </Group>
 
           {['eyebrow', 'name', 'title'].map((key, i) => (
-            <Group key={key} title={`Line ${i + 1} — ${key === 'eyebrow' ? 'announcement' : key === 'name' ? 'headline' : 'credit'}`}>
+            <Group key={key} title={`Line ${i + 1} — ${lineLabels[key]}`}>
               <textarea
                 rows={key === 'title' ? 2 : 1}
                 value={state.text[key].text}
@@ -487,7 +610,17 @@ export default function App({ path }) {
           </Group>
 
           <Group title="Layout">
-            <button className="wide ghost" onClick={() => setState((st) => ({ ...st, text: defaultText(st.ar), logo: { ...defaultLogo(st.ar), img: st.logo.img, name: st.logo.name, show: st.logo.show } }))}>
+            <button
+              className="wide ghost"
+              onClick={() =>
+                setState((st) => ({
+                  ...st,
+                  text: defaultText(st.ar, st.style),
+                  scrim: defaultScrim(st.ar, st.style),
+                  logo: { ...defaultLogo(st.ar), img: st.logo.img, name: st.logo.name, show: st.logo.show },
+                }))
+              }
+            >
               Reset text to template
             </button>
           </Group>
@@ -496,7 +629,6 @@ export default function App({ path }) {
     </div>
   );
 }
-
 
 async function dims(file) {
   try {

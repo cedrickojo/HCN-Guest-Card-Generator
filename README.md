@@ -13,8 +13,45 @@ Routing is a ~40-line hand-rolled router (`src/router.jsx`) on real paths, so
 
 ## Guest cards
 
-Same renderer as the `hcn-guest-card` skill — same texture, glow, grade, scrim
-and type metrics — but with direct manipulation instead of `--nudge 1 0 -120`.
+Two styles, one set of controls:
+
+- **Classic** — the `hcn-guest-card` skill's renderer: same texture, glow,
+  grade, scrim and type metrics, with direct manipulation instead of
+  `--nudge 1 0 -120`.
+- **Website** — the guest cards on watchhcn.com's home deck, ported from
+  `makeCard()` in HCN-Website's `index.html`: a palette backdrop with a radial
+  glow behind the head and a halftone dot field, the cut-out seated with a
+  wide soft shadow, a scrim into the name band, an EP chip top-left and the
+  "HCN" dot-matrix mark top-right. Five palettes plus free colours. Type is
+  the site's own Archivo (name, chip, sub) and Doto (mark), self-hosted as OFL
+  variable fonts in `public/assets/`. The cut-out is drawn ungraded, as on the
+  site; every headshot keeps both the raw cut and the graded one, and each
+  style draws its own. Switching style re-templates text and scrim (the two
+  layouts share nothing) and follows the site to 4:5; headshots stay put.
+
+### Cutout engine — in browser, or the website's cloud pipeline
+
+Headshots can be cut out two ways:
+
+- **In browser** (default, free): IMG.LY's isnet in WASM, as before.
+- **Cloud (fal)**: the website's own pipeline — **Topaz Gigapixel** upscale
+  ($0.08/image, Standard V2, face recovery on) then **Bria RMBG 2.0**
+  background removal ($0.018/image) — the same models, parameters and
+  auto-factor logic as HCN-database's `lib/photos/`. Noticeably better hair
+  and skin edges than the in-browser model. A placed headshot can also be
+  **enhanced** (upscale + re-cut) or **re-cut** (Bria only) from its panel.
+
+The cloud engine is `api/enhance.js`, a Vercel function holding `FAL_KEY`;
+the key never reaches the browser. It only appears in the UI when the key is
+configured (`GET /api/enhance` reports it). The browser normalises the upload
+(long edge ≤ 2048, transparency flattened onto white, JPEG) so requests stay
+inside the function's 4.5 MB body limit; results are fal-hosted URLs, fetched
+directly or via `api/fetch.js` when the CDN won't answer cross-origin.
+
+Guards: the function refuses cross-site origins, and an optional
+`ENHANCE_TOKEN` env var makes it require an `x-enhance-token` header (set it
+in the browser with `localStorage.setItem('hcn.enhanceToken', …)`). There is
+no quota — a public deployment with the key set is a public wallet.
 
 ## What it does
 
@@ -125,7 +162,14 @@ Those two enable `SharedArrayBuffer`, which lets the ONNX runtime use multiple
 threads — without them cutouts still work, just slower. `credentialless` is used
 rather than `require-corp` so the cross-origin model fetch isn't blocked.
 
-No serverless functions, no environment variables, no API keys.
+| Variable | What it is |
+|----------|------------|
+| `FAL_KEY` | fal.ai key (`id:secret`) for the cloud cutout engine. Optional — without it the cloud option is hidden and everything runs in the browser. Store it as a **Secret** in Vercel. |
+| `ENHANCE_TOKEN` | Optional shared secret the browser must send as `x-enhance-token`. |
+| `ENHANCE_ALLOWED_ORIGINS` | Optional comma-separated extra origins allowed to call `/api/enhance`. |
+
+Local: `API_PROXY=http://localhost:3000 npm run dev` forwards `/api` to a
+`vercel dev` (or any mock) so the cloud path can be exercised without deploying.
 
 ## Why background removal runs in the browser
 

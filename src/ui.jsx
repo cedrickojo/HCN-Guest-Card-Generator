@@ -1,8 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
+/* The two brand OTFs, plus the two OFL variable fonts the website substitutes
+ * for them (Archivo for F37 Analog, Doto for RL Okima) so the "Website" card
+ * style sets exactly as the site does. Variable faces carry a weight range. */
 const FACES = [
-  ['F37Analog', '/assets/F37Analog-SemiBold.otf'],
-  ['RLOkima', '/assets/RL-Okima-Ink-102.otf'],
+  ['F37Analog', '/assets/F37Analog-SemiBold.otf', {}],
+  ['RLOkima', '/assets/RL-Okima-Ink-102.otf', {}],
+  ['Archivo', '/assets/Archivo-Variable.woff2', { weight: '100 900' }],
+  ['Doto', '/assets/Doto-Variable.woff2', { weight: '100 900' }],
 ];
 
 /* Memoised at module scope so switching pages doesn't re-add a FontFace for
@@ -15,7 +20,7 @@ let brandFonts = null;
 export function loadBrandFonts() {
   if (!brandFonts) {
     brandFonts = Promise.all(
-      FACES.map(([family, url]) => new FontFace(family, `url(${url})`).load().then((f) => document.fonts.add(f)))
+      FACES.map(([family, url, desc]) => new FontFace(family, `url(${url})`, desc).load().then((f) => document.fonts.add(f)))
     );
   }
   return brandFonts;
