@@ -243,11 +243,18 @@ function removerInput(spec, params, imageUrl) {
 /* "auto" = the smallest factor that fills 2048 px, ≤ 4×, ≤ 24 MP upscaled;
  * ≤ 1 means the photo is already big enough and the call is skipped. */
 function pickFactor(params, w, h, steps) {
-  const longEdge = Math.max(w, h);
-  const needed = longEdge > 0 ? Math.ceil(TARGET_EDGE / longEdge) : 1;
   const wanted = params.scale;
-  const requested = typeof wanted === 'string' && wanted !== 'auto' ? Number(wanted) : Math.min(MAX_FACTOR, needed);
-  const byPixels = Math.floor(Math.sqrt(MAX_UPSCALED_PIXELS / Math.max(1, w * h)));
+  const explicit = typeof wanted === 'string' && wanted !== 'auto' ? Number(wanted) : 0;
+  if (!(w > 0 && h > 0)) {
+    // no dimensions from the caller: nothing to size "auto" against, so take
+    // the explicit factor or a plain 2× rather than silently skipping
+    const factor = explicit || 2;
+    steps.push(`dimensions not supplied — upscaling ${factor}×`);
+    return factor;
+  }
+  const needed = Math.ceil(TARGET_EDGE / Math.max(w, h));
+  const requested = explicit || Math.min(MAX_FACTOR, needed);
+  const byPixels = Math.floor(Math.sqrt(MAX_UPSCALED_PIXELS / (w * h)));
   const factor = Math.min(requested, byPixels);
   if (factor > 1 && factor < requested) steps.push(`scale limited to ${factor}× (24 MP cap)`);
   if (!(factor > 1)) {
