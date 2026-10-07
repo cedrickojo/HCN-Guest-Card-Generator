@@ -147,6 +147,30 @@ function falKey() {
   return key && /^[\x20-\x7E]+$/.test(key) ? key : null;
 }
 
+/* fal's refusals carry the reason in `detail` — "User is locked. Reason:
+ * TOP_UP." when the account has no credit, "Invalid key" and so on. Those
+ * are the user's business, not a secret, so they are translated and sent
+ * back; anything else upstream stays in the logs. */
+export function explainFal(status, text) {
+  let detail = '';
+  try {
+    const j = JSON.parse(text);
+    detail = typeof j.detail === 'string' ? j.detail : Array.isArray(j.detail) ? j.detail.map((d) => d.msg || JSON.stringify(d)).join('; ') : '';
+  } catch {
+    /* not JSON */
+  }
+  if (/TOP_UP|balance|locked/i.test(detail)) {
+    return { status: 402, error: 'fal.ai account needs a top-up — add credit at fal.ai/dashboard/billing, then try again (no redeploy needed).' };
+  }
+  if (status === 401 || /invalid.*key|unauthori[sz]ed/i.test(detail)) {
+    return { status: 502, error: 'fal.ai rejected the key (FAL_KEY on the server) — check it at fal.ai/dashboard/keys.' };
+  }
+  if (status === 403) return { status: 502, error: `fal.ai refused the request: ${detail || 'forbidden'}` };
+  if (status === 422) return { status: 400, error: `fal.ai rejected the input: ${detail || 'unprocessable'}` };
+  if (status === 429) return { status: 429, error: 'fal.ai is rate-limiting — wait a moment and try again.' };
+  return { status: 502, error: `fal.ai error ${status}${detail ? `: ${detail.slice(0, 200)}` : ''}` };
+}
+
 async function falRun(endpoint, input) {
   const res = await fetch(`${FAL_RUN}/${endpoint}`, {
     method: 'POST',
@@ -154,7 +178,13 @@ async function falRun(endpoint, input) {
     body: JSON.stringify(input),
   });
   const text = await res.text();
-  if (!res.ok) throw httpError(502, `fal ${endpoint} → ${res.status}: ${text.slice(0, 300)}`);
+  if (!res.ok) {
+    const why = explainFal(res.status, text);
+    console.error(`fal ${endpoint} → ${res.status}: ${text.slice(0, 300)}`);
+    const e = httpError(why.status, why.error);
+    e.upstream = true;
+    throw e;
+  }
   return JSON.parse(text);
 }
 
@@ -367,8 +397,10 @@ export default async function handler(req, res) {
     return res.status(200).json(await enhance(body));
   } catch (err) {
     const code = err.status || 500;
-    // upstream bodies never reach the client verbatim; they go to the logs
-    if (code >= 500) console.error('enhance failed:', err.message);
-    return res.status(code).json({ ok: false, error: code >= 500 ? err.message.split(':')[0] : err.message });
+    if (code >= 500 && !err.upstream) console.error('enhance failed:', err.message);
+    // fal's own refusals are already translated into something the user can
+    // act on; anything else at 5xx is reduced to its first clause
+    const error = err.upstream || code < 500 ? err.message : err.message.split(':')[0];
+    return res.status(code).json({ ok: false, error });
   }
 }
