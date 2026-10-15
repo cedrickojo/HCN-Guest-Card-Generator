@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  DEFAULT_LOGO,
   EXPORT_SIZES,
   FONT_CHOICES,
+  HL,
+  LOGO_POSITIONS,
+  LOGO_VARIANTS,
   MAX_UPLOAD_BYTES,
   THUMB,
   backgroundRect,
@@ -17,7 +21,7 @@ import {
 } from './thumb.js';
 import { DEFAULT_MODEL, MODELS, alphaMatte } from './removeBg.js';
 import { cloudEnhance, cloudStatus } from './enhance.js';
-import { DEFAULT_MATTE, composeCutout, renderStrokes } from './matte.js';
+import { DEFAULT_MATTE, alphaBounds, composeCutout, cropTo, renderStrokes, trimWorthwhile } from './matte.js';
 import { ColorRow, DropZone, Group, Row, Segmented, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
 import { Tabs } from './router.jsx';
 
@@ -33,7 +37,7 @@ const newText = (over = {}) => ({
   id: nextId++,
   show: true,
   text: 'Nobody Else Will||Tell You',
-  font: 'black',
+  font: 'system',
   size: 104,
   color: '#ffffff',
   align: 'center',
@@ -51,7 +55,36 @@ const initialState = () => ({
   subjects: [],
   overlays: [],
   texts: [newText()],
+  logo: { ...DEFAULT_LOGO },
 });
+
+/* Mark or unmark the selected span of a block's text with the ==highlight==
+ * marker, keeping the markers balanced on either side of the selection so
+ * nothing outside it changes state. */
+export function toggleHighlight(text, start, end, on) {
+  const before = text.slice(0, start);
+  const mid = text.slice(start, end);
+  const after = text.slice(end);
+  const count = (t) => t.split(HL).length - 1;
+  const insideOpen = count(before) % 2 === 1;
+  const parityAtEnd = (count(before) + count(mid)) % 2;
+  const stripped = mid.split(HL).join('');
+  let out;
+  if (on) {
+    out = insideOpen ? before + stripped : before + HL + stripped + HL;
+  } else {
+    out = insideOpen ? before + HL + stripped + HL : before + stripped;
+  }
+  // the text after the selection must resume in the state it had before
+  const parityNow = count(out) % 2;
+  out += (parityNow !== parityAtEnd ? HL : '') + after;
+  // a selection that swallowed a whole run leaves an empty one (====); drop
+  // those — removing a pair never changes the state of anything after it
+  while (out.includes(HL + HL)) out = out.replace(HL + HL, '');
+  const at = out.indexOf(stripped, Math.max(0, start - 2 * HL.length));
+  const s0 = at >= 0 ? at : start;
+  return { text: out, start: s0, end: s0 + stripped.length };
+}
 
 /* Presets embed their images as data URLs so one file restores the whole
  * template — backdrop, vignette, overlays, text — onto next week's headshots.
@@ -88,7 +121,7 @@ export default function Thumbnail({ path }) {
   const [liveBox, setLiveBox] = useState(null); // crop box mid-drag
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
-  const [exportSize, setExportSize] = useState('1280x720');
+  const [exportSize, setExportSize] = useState('1920x1080');
   const [format, setFormat] = useState('png');
   const [lastSize, setLastSize] = useState(null);
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -114,6 +147,28 @@ export default function Thumbnail({ path }) {
   const useCloud = engine === 'cloud' && cloud.configured;
   const fontsReady = useBrandFonts();
   const canvasRef = useRef(null);
+  const stageRef = useRef(null);
+  const editorRef = useRef(null);
+  const textareaRefs = useRef(new Map()); // text id -> textarea in the panel
+  const [editing, setEditing] = useState(null); // text id being edited on the canvas
+  const [openSig, setOpenSig] = useState({}); // text id -> bump to pop its section open
+  const [logos, setLogos] = useState({});
+  useEffect(() => {
+    let live = true;
+    Promise.all(
+      LOGO_VARIANTS.map(async (v) => {
+        try {
+          const bmp = await createImageBitmap(await (await fetch(v.file)).blob());
+          return [v.id, bmp];
+        } catch {
+          return [v.id, null];
+        }
+      })
+    ).then((pairs) => live && setLogos(Object.fromEntries(pairs)));
+    return () => {
+      live = false;
+    };
+  }, []);
   const dragRef = useRef(null);
   const cropDragRef = useRef(null);
   const paintRef = useRef(null);
@@ -230,10 +285,87 @@ export default function Thumbnail({ path }) {
         cropping,
         brush: ring,
         paintingId: paintRef.current?.id ?? null,
+        editingId: editing,
+        logos,
       });
     });
     return () => cancelAnimationFrame(raf);
-  }, [state, fontsReady, selectionRect, cropSubject, liveBox, painting, brushPos, brush, tool]);
+  }, [state, fontsReady, selectionRect, cropSubject, liveBox, painting, brushPos, brush, tool, editing, logos]);
+
+  /* ---- in-place text editing ----
+   *
+   * Double-click a block and a textarea lands over it, in its face, size and
+   * alignment; the canvas stops drawing that block until the edit ends, so
+   * there is one copy on screen. Its section in the panel opens too. */
+  const editingItem = editing ? state.texts.find((t) => t.id === editing) : null;
+  const editorStyle = useMemo(() => {
+    if (!editingItem || !canvasRef.current || !stageRef.current) return null;
+    const ctx = canvasRef.current.getContext('2d');
+    const s = scaleFor(PREVIEW_W);
+    const L = textLayout(ctx, { ...editingItem, show: true }, PREVIEW_W, PREVIEW_H, s);
+    const cr = canvasRef.current.getBoundingClientRect();
+    const sr = stageRef.current.getBoundingClientRect();
+    const k = cr.width / PREVIEW_W; // preview px -> css px
+    const f = FONT_CHOICES.find((x) => x.id === editingItem.font) || FONT_CHOICES[0];
+    const lines = Math.max(1, String(editingItem.text).split(/\r?\n|\|\|/).length);
+    const px = editingItem.size * s * k;
+    const lineH = px * editingItem.lineGap;
+    const top = editingItem.ny * PREVIEW_H * k;
+    const left = L ? L.x * k : editingItem.nx * PREVIEW_W * k;
+    const width = Math.max(L ? L.w * k : 0, 180) + 16;
+    return {
+      left: cr.left - sr.left + left - 8,
+      top: cr.top - sr.top + top - 4,
+      width,
+      height: lineH * lines + 10,
+      fontSize: px,
+      lineHeight: `${lineH}px`,
+      fontFamily: f.stack,
+      fontWeight: f.weight,
+      textAlign: editingItem.align,
+      textTransform: editingItem.upper ? 'uppercase' : 'none',
+      color: editingItem.color,
+    };
+  }, [editingItem]);
+
+  useEffect(() => {
+    if (editing && editorRef.current) {
+      editorRef.current.focus();
+      editorRef.current.select();
+    }
+  }, [editing]);
+
+  const onDoubleClick = (e) => {
+    if (painting || cropSubject) return;
+    const [px, py] = toCanvas(e);
+    const hit = pick(px, py);
+    if (!hit || hit.kind !== 'text') return;
+    dragRef.current = null;
+    setSel({ kind: 'text', id: hit.id });
+    setEditing(hit.id);
+    setOpenSig((o) => ({ ...o, [hit.id]: (o[hit.id] || 0) + 1 }));
+  };
+
+  /* Wrap or unwrap the selection in whichever textarea holds this block —
+   * the in-place editor when it is open, else the panel's. */
+  const highlightSelection = (id, on) => {
+    const ta = editing === id ? editorRef.current : textareaRefs.current.get(id);
+    const item = state.texts.find((t) => t.id === id);
+    if (!ta || !item) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    if (start === end) {
+      setStatus('Select some text in the box first, then mark it.');
+      return;
+    }
+    const r = toggleHighlight(item.text, Math.min(start, end), Math.max(start, end), on);
+    commit(`hl-mark:${id}`, false);
+    setState((st) => ({ ...st, texts: st.texts.map((t) => (t.id === id ? { ...t, text: r.text } : t)) }));
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(r.start, r.end);
+    });
+  };
 
   /* ---- hit testing: text, overlays, cutouts front to back, then backdrop ---- */
   const pick = (px, py) => {
@@ -567,6 +699,15 @@ export default function Thumbnail({ path }) {
           const maskBlob = await alphaMatte(file, model, (m) => setStatus(`${file.name} — ${m}`));
           mask = await createImageBitmap(maskBlob);
         }
+        // trim to the matte's extent (plus a band for Restore to work in), so a
+        // headshot cut from a wide frame isn't a frame-wide hit box
+        let trim = { ...FULL_CROP };
+        const bounds = alphaBounds(mask);
+        if (trimWorthwhile(bounds)) {
+          trim = bounds;
+          src = cropTo(src, bounds);
+          mask = cropTo(mask, bounds);
+        }
         const matte = { ...DEFAULT_MATTE };
         const img = composeCutout(src, mask, matte);
         commit('add-subject', false);
@@ -584,6 +725,7 @@ export default function Thumbnail({ path }) {
                 src,
                 mask,
                 model: usedModel,
+                trim,
                 matte,
                 img,
                 strokes: [],
@@ -647,6 +789,9 @@ export default function Thumbnail({ path }) {
       } else {
         const maskBlob = await alphaMatte(sub.file, nextModel, (m) => setStatus(`${sub.name} — ${m}`));
         mask = await createImageBitmap(maskBlob);
+        // the subject's source was trimmed on import; a fresh matte of the
+        // whole file must be trimmed the same way or it lands stretched
+        if (sub.trim && (sub.trim.w < 1 || sub.trim.h < 1)) mask = cropTo(mask, sub.trim);
       }
       commit('recut', false);
       setState((st) => ({
@@ -719,7 +864,7 @@ export default function Thumbnail({ path }) {
     setBusy(true);
     setStatus('Rendering');
     try {
-      const blob = await exportThumb(state, exportSize, format, 0.92);
+      const blob = await exportThumb(state, exportSize, format, 0.92, logos);
       setLastSize(blob.size);
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -748,6 +893,7 @@ export default function Thumbnail({ path }) {
       vignette: state.vignette,
       overlays: state.overlays.map((o) => ({ ...o, img: toDataURL(o.img) })),
       texts: state.texts,
+      logo: state.logo,
     };
     const blob = new Blob([JSON.stringify(preset)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -775,6 +921,7 @@ export default function Thumbnail({ path }) {
         vignette: p.vignette ?? st.vignette,
         overlays: overlays ?? st.overlays,
         texts: Array.isArray(p.texts) ? p.texts.map((t) => ({ ...t, id: nextId++ })) : st.texts,
+        logo: p.logo ? { ...DEFAULT_LOGO, ...p.logo } : st.logo,
         subjects: st.subjects,
       }));
       setStatus('');
@@ -818,6 +965,10 @@ export default function Thumbnail({ path }) {
     commit(`text:${id}:${key}`);
     setState((st) => ({ ...st, texts: st.texts.map((t) => (t.id === id ? { ...t, [key]: value } : t)) }));
   };
+  const updLogo = (key, value) => {
+    commit(`logo:${key}`);
+    setState((st) => ({ ...st, logo: { ...st.logo, [key]: value } }));
+  };
   const updHl = (id, key, value) => {
     commit(`hl:${id}:${key}`);
     setState((st) => ({
@@ -856,7 +1007,7 @@ export default function Thumbnail({ path }) {
       const L = textLayout(ctx, last, PREVIEW_W, PREVIEW_H, scaleFor(PREVIEW_W));
       if (L) ny = clamp((L.y + L.h) / PREVIEW_H + 0.02, 0, 0.9);
     }
-    const t = newText({ text: 'The Truth!', ny, highlight: { on: true, color: '#f5232c', padX: 22, padY: 12, radius: 4 } });
+    const t = newText({ text: 'More text', ny });
     commit('add-text', false);
     setState((st) => ({ ...st, texts: [...st.texts, t] }));
     setSel({ kind: 'text', id: t.id });
@@ -885,7 +1036,7 @@ export default function Thumbnail({ path }) {
       </header>
 
       <main>
-        <section className="stage">
+        <section className="stage" ref={stageRef}>
           <canvas
             ref={canvasRef}
             className={`card thumb${cropId ? ' cropping' : ''}${painting ? ' painting' : ''}`}
@@ -895,14 +1046,35 @@ export default function Thumbnail({ path }) {
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
             onPointerLeave={() => setBrushPos(null)}
+            onDoubleClick={onDoubleClick}
           />
+          {editingItem && editorStyle && (
+            <textarea
+              ref={editorRef}
+              className="inline-edit"
+              style={editorStyle}
+              value={editingItem.text}
+              spellCheck={false}
+              onChange={(e) => updText(editingItem.id, 'text', e.target.value)}
+              onBlur={() => setEditing(null)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
+                  e.preventDefault();
+                  setEditing(null);
+                }
+                e.stopPropagation();
+              }}
+            />
+          )}
           <p className="hint">
             {status ||
               (painting
                 ? `${tool.mode === 'add' ? 'Restore' : 'Erase'} — paint on the headshot. Esc to finish, ⌘Z undoes a stroke.`
                 : cropId
                   ? 'Crop mode — drag a box over the headshot. Esc or Done to finish.'
-                  : 'Drag anything. Scroll to scale. Arrow keys nudge. ⌘Z undoes.')}
+                  : editing
+                    ? 'Editing on the canvas — Esc or ⌘Enter to finish. Select text and use Highlight selection in its section.'
+                    : 'Drag anything. Double-click text to edit it in place. Scroll to scale. ⌘Z undoes.')}
           </p>
           {lastSize != null && (
             <p className={`hint ${oversize ? 'warn' : ''}`}>
@@ -1068,6 +1240,30 @@ export default function Thumbnail({ path }) {
             </Group>
           )}
 
+          <Group title="HCN logo">
+            <Row label="Show">
+              <input type="checkbox" checked={state.logo.on} onChange={(e) => updLogo('on', e.target.checked)} />
+            </Row>
+            <Row label="Variant">
+              <select value={state.logo.variant} onChange={(e) => updLogo('variant', e.target.value)}>
+                {LOGO_VARIANTS.map((v) => (
+                  <option key={v.id} value={v.id}>{v.label}</option>
+                ))}
+              </select>
+            </Row>
+            <Slider label="Size" value={state.logo.size} min={0.05} max={0.4} step={0.005} onChange={(x) => updLogo('size', x)} fmt={(x) => `${Math.round(x * 100)}% of width`} />
+            <Slider label="Margin" value={state.logo.margin} min={0} max={0.12} step={0.0025} onChange={(x) => updLogo('margin', x)} fmt={(x) => `${(x * 100).toFixed(1)}%`} />
+            <Row label="Position">
+              <div className="seg grid6">
+                {LOGO_POSITIONS.map((p) => (
+                  <button key={p.id} className={state.logo.pos === p.id ? 'on' : ''} title={p.label} onClick={() => updLogo('pos', p.id)}>
+                    {p.id.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </Row>
+          </Group>
+
           <Group title="Overlays">
             <DropZone label="Add overlay image" multiple onFiles={addOverlays} />
             {overlayLayers.length === 0 && <p className="empty">Logos, badges, arrows — placed as-is, no background removal.</p>}
@@ -1098,11 +1294,20 @@ export default function Thumbnail({ path }) {
           </Group>
 
           {state.texts.map((t, i) => (
-            <Group key={t.id} title={`Text ${i + 1}`}
+            <Group key={t.id} title={`Text ${i + 1}`} openSignal={openSig[t.id] || 0}
               right={<button className="x" title="Remove" onClick={() => removeFrom('texts', t.id)}>×</button>}
             >
               <textarea rows={2} value={t.text} placeholder="One line per row, or use ||"
+                ref={(el) => (el ? textareaRefs.current.set(t.id, el) : textareaRefs.current.delete(t.id))}
                 onChange={(e) => updText(t.id, 'text', e.target.value)} onFocus={() => setSel({ kind: 'text', id: t.id })} />
+              <div className="hlbtns">
+                <button onMouseDown={(e) => e.preventDefault()} onClick={() => highlightSelection(t.id, true)} title="Wrap the selected text in == == so it gets a plate">
+                  Highlight selection
+                </button>
+                <button onMouseDown={(e) => e.preventDefault()} onClick={() => highlightSelection(t.id, false)} title="Remove the plate from the selected text">
+                  Unhighlight
+                </button>
+              </div>
               <Row label="Font">
                 <select value={t.font} onChange={(e) => updText(t.id, 'font', e.target.value)}>
                   {FONT_CHOICES.map((f) => (
@@ -1121,10 +1326,10 @@ export default function Thumbnail({ path }) {
               <Row label="Show">
                 <input type="checkbox" checked={t.show} onChange={(e) => updText(t.id, 'show', e.target.checked)} />
               </Row>
-              <Row label="Highlight">
+              <Row label="Highlight whole block">
                 <input type="checkbox" checked={t.highlight.on} onChange={(e) => updHl(t.id, 'on', e.target.checked)} />
               </Row>
-              {t.highlight.on && (
+              {(t.highlight.on || t.text.includes(HL)) && (
                 <>
                   <ColorRow label="Highlight colour" value={t.highlight.color} onChange={(hex) => updHl(t.id, 'color', hex)} />
                   <Slider label="Pad across" value={t.highlight.padX} min={0} max={80} step={1} onChange={(x) => updHl(t.id, 'padX', x)} />
@@ -1137,7 +1342,7 @@ export default function Thumbnail({ path }) {
 
           <Group title="Add">
             <button className="wide" onClick={addTextBlock}>Add text block</button>
-            <p className="empty">Highlight applies to a whole block — keep the highlighted line as its own block, as in the reference.</p>
+            <p className="empty">One block can hold it all: select a word or line in its box and press Highlight selection. The marked text shows as ==like this==.</p>
           </Group>
         </aside>
       </main>

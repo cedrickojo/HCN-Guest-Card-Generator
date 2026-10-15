@@ -139,12 +139,45 @@ function drawGlow(ctx, sub, r, s) {
 
 /* ---------- text ---------- */
 
-/** Per-line geometry for a text block: where each line draws, and the tight
- *  box around its glyphs that a highlight fills. Also the union bounds, which
- *  is what hit-testing and the selection outline use. */
+/* Inline highlights are marked in the text itself as ==like this==, so one
+ * block can carry a highlighted word, line or phrase without being split into
+ * three blocks kept in register by hand. The marker is plain text, survives
+ * presets, and is what the "Highlight selection" button inserts. A block with
+ * `highlight.on` is highlighted throughout, markers or not. */
+export const HL = '==';
+
+/** Lines of runs: [[{text, hl}, …], …]. A marker may open on one line and
+ *  close on a later one; the state carries across. Lines are trimmed and
+ *  blank ones dropped, as splitLines() does, unless the whole text is blank. */
+export function parseRuns(text, upper = false) {
+  const src = String(text ?? '');
+  const lines = [[]];
+  let hl = false;
+  src.split(HL).forEach((chunk, i) => {
+    if (i > 0) hl = !hl;
+    chunk.split(/\r?\n|\|\|/).forEach((piece, j) => {
+      if (j > 0) lines.push([]);
+      if (piece) lines[lines.length - 1].push({ text: upper ? piece.toUpperCase() : piece, hl });
+    });
+  });
+  const trimmed = lines.map((runs) => {
+    if (!runs.length) return runs;
+    const first = { ...runs[0], text: runs[0].text.replace(/^\s+/, '') };
+    const out = [first, ...runs.slice(1)];
+    const li = out.length - 1;
+    out[li] = { ...out[li], text: out[li].text.replace(/\s+$/, '') };
+    return out.filter((r) => r.text);
+  });
+  const kept = trimmed.filter((runs) => runs.length);
+  return kept.length ? kept : [[{ text: '', hl: false }]];
+}
+
+/** Per-line geometry for a text block: where each run draws, and the tight
+ *  box around each highlighted run's glyphs. Also the union bounds, which is
+ *  what hit-testing and the selection outline use. */
 export function textLayout(ctx, item, W, H, s) {
   if (!item.show) return null;
-  const lines = splitLines(item.upper ? String(item.text).toUpperCase() : item.text);
+  const lines = parseRuns(item.text, item.upper);
   applyFont(ctx, item, s);
   ctx.textBaseline = 'alphabetic';
   const size = item.size * s;
@@ -155,6 +188,7 @@ export function textLayout(ctx, item, W, H, s) {
   const padY = item.highlight.padY * s;
   const originX = item.nx * W;
   const top = item.ny * H;
+  const all = !!item.highlight.on;
 
   const out = [];
   let minX = Infinity;
@@ -162,21 +196,32 @@ export function textLayout(ctx, item, W, H, s) {
   let minY = Infinity;
   let maxY = -Infinity;
 
-  lines.forEach((text, i) => {
+  lines.forEach((runs, i) => {
+    const text = runs.map((r) => r.text).join('');
     const m = ctx.measureText(text);
     const w = m.width;
     const x = item.align === 'center' ? originX - w / 2 : item.align === 'right' ? originX - w : originX;
     const baseline = top + ascent + i * lineH;
     // actualBoundingBox hugs the glyphs, so the highlight sits on the cap
-    // height instead of floating on the font's full line box
+    // height instead of floating on the font's full line box; measured on
+    // the whole line so every box on it shares one top and bottom
     const a = m.actualBoundingBoxAscent || size * 0.72;
     const d = m.actualBoundingBoxDescent || 0;
-    const box = text ? { x: x - padX, y: baseline - a - padY, w: w + 2 * padX, h: a + d + 2 * padY } : null;
-    out.push({ text, x, baseline, w, box });
-    const l = box ? box.x : x;
-    const rt = box ? box.x + box.w : x + w;
-    const t = box ? box.y : baseline - a;
-    const b = box ? box.y + box.h : baseline + d;
+    let cx = x;
+    const placed = runs.map((r) => {
+      const rw = ctx.measureText(r.text).width;
+      const run = { text: r.text, x: cx, w: rw, hl: all || r.hl };
+      cx += rw;
+      return run;
+    });
+    const boxes = placed
+      .filter((r) => r.hl && r.text.trim())
+      .map((r) => ({ x: r.x - padX, y: baseline - a - padY, w: r.w + 2 * padX, h: a + d + 2 * padY }));
+    out.push({ text, x, baseline, w, runs: placed, boxes });
+    const l = Math.min(x, ...boxes.map((b) => b.x));
+    const rt = Math.max(x + w, ...boxes.map((b) => b.x + b.w));
+    const t = Math.min(baseline - a, ...boxes.map((b) => b.y));
+    const b = Math.max(baseline + d, ...boxes.map((bx) => bx.y + bx.h));
     if (l < minX) minX = l;
     if (rt > maxX) maxX = rt;
     if (t < minY) minY = t;
@@ -184,7 +229,7 @@ export function textLayout(ctx, item, W, H, s) {
   });
 
   if (!out.length) return null;
-  return { lines: out, x: minX, y: minY, w: maxX - minX, h: maxY - minY, lineH, size };
+  return { lines: out, x: minX, y: minY, w: maxX - minX, h: maxY - minY, lineH, size, ascent };
 }
 
 function drawText(ctx, item, W, H, s) {
@@ -193,18 +238,56 @@ function drawText(ctx, item, W, H, s) {
   applyFont(ctx, item, s);
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
-  // every highlight box first, then every line — otherwise a tall box on line
+  // every highlight box first, then every run — otherwise a tall box on line
   // two paints over the descenders of line one
-  if (item.highlight.on) {
-    ctx.fillStyle = item.highlight.color;
-    for (const ln of L.lines) {
-      if (!ln.box) continue;
-      roundRectPath(ctx, ln.box.x, ln.box.y, ln.box.w, ln.box.h, item.highlight.radius * s);
+  ctx.fillStyle = item.highlight.color;
+  for (const ln of L.lines) {
+    for (const b of ln.boxes) {
+      roundRectPath(ctx, b.x, b.y, b.w, b.h, item.highlight.radius * s);
       ctx.fill();
     }
   }
   ctx.fillStyle = item.color;
-  for (const ln of L.lines) ctx.fillText(ln.text, ln.x, ln.baseline);
+  for (const ln of L.lines) for (const r of ln.runs) ctx.fillText(r.text, r.x, ln.baseline);
+}
+
+/* ---------- HCN logo ---------- */
+
+export const LOGO_VARIANTS = [
+  { id: 'white', label: 'White', file: '/assets/hcn-logo-white.png' },
+  { id: 'coral', label: 'Vital Red', file: '/assets/hcn-logo-coral.png' },
+  { id: 'gray', label: 'X-Ray Gray', file: '/assets/hcn-logo-gray.png' },
+];
+
+export const LOGO_POSITIONS = [
+  { id: 'tl', label: 'Top left' },
+  { id: 'tm', label: 'Top middle' },
+  { id: 'tr', label: 'Top right' },
+  { id: 'bl', label: 'Bottom left' },
+  { id: 'bm', label: 'Bottom middle' },
+  { id: 'br', label: 'Bottom right' },
+];
+
+export const DEFAULT_LOGO = { on: true, variant: 'white', size: 0.14, pos: 'tr', margin: 0.035 };
+
+/** Where the logo sits: `size` is its width as a fraction of the frame,
+ *  `margin` the gap to the edges, also of the frame width, so the inset reads
+ *  the same at every export size. */
+export function logoRect(logo, img, W, H) {
+  const w = logo.size * W;
+  const h = (img.height / img.width) * w;
+  const m = logo.margin * W;
+  const x = logo.pos.endsWith('l') ? m : logo.pos.endsWith('r') ? W - m - w : (W - w) / 2;
+  const y = logo.pos.startsWith('t') ? m : H - m - h;
+  return { x, y, w, h };
+}
+
+function drawLogo(ctx, W, H, logo, images) {
+  if (!logo || !logo.on) return;
+  const img = images && images[logo.variant];
+  if (!img) return;
+  const r = logoRect(logo, img, W, H);
+  ctx.drawImage(img, r.x, r.y, r.w, r.h);
 }
 
 /* ---------- crop ---------- */
@@ -299,9 +382,12 @@ export function drawThumb(ctx, W, H, state, opts = {}) {
 
   if (state.vignette.overSubjects) drawVignette(ctx, W, H, state.vignette);
 
-  for (const item of state.texts) drawText(ctx, item, W, H, s);
+  // a block being edited in place is drawn by the editor, not the canvas
+  for (const item of state.texts) if (item.id !== opts.editingId) drawText(ctx, item, W, H, s);
 
   drawOverlays(ctx, W, H, state.overlays || [], true);
+
+  drawLogo(ctx, W, H, state.logo, opts.logos);
 
   if (cropping) drawCropOverlay(ctx, W, H, cropping.box, s);
 
@@ -371,10 +457,10 @@ function drawCropOverlay(ctx, W, H, box, s) {
   ctx.restore();
 }
 
-export async function exportThumb(state, size, format, quality) {
+export async function exportThumb(state, size, format, quality, logos) {
   const [W, H] = EXPORT_SIZES[size] || EXPORT_SIZES['1280x720'];
   const cv = makeCanvas(W, H);
-  drawThumb(cv.getContext('2d'), W, H, state);
+  drawThumb(cv.getContext('2d'), W, H, state, { logos });
   const type = format === 'jpeg' ? 'image/jpeg' : 'image/png';
   if (cv.convertToBlob) return cv.convertToBlob({ type, quality });
   return new Promise((res) => cv.toBlob(res, type, quality));

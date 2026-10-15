@@ -162,3 +162,64 @@ export function composeCutout(source, mask, m = DEFAULT_MATTE, touch = null, opt
   cx.putImageData(img, 0, 0);
   return cv;
 }
+
+/* ---------- trimming ----------
+ *
+ * A cut-out keeps the whole frame it came from, so a headshot that fills a
+ * fifth of a wide shot drags four-fifths of transparent canvas around with
+ * it — every hit box is that wide, and two headshots can't be placed close
+ * without one grabbing the other. Trim to the matte's opaque extent instead,
+ * with a padding band kept around it so Restore still has something to bring
+ * back where the model cut a little too much. */
+
+/** Normalised bounds of the opaque pixels in an alpha-carrying image, padded
+ *  by `pad` of the box's own size on every side; null when fully transparent. */
+export function alphaBounds(img, { threshold = 24, pad = 0.1, minPadPx = 24 } = {}) {
+  const k = Math.min(1, 1024 / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * k));
+  const h = Math.max(1, Math.round(img.height * k));
+  const ctx = makeCanvas(w, h).getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  let x0 = w;
+  let y0 = h;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (d[(y * w + x) * 4 + 3] > threshold) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return null;
+  const bw = x1 - x0 + 1;
+  const bh = y1 - y0 + 1;
+  const px = Math.max(bw * pad, minPadPx * k);
+  const py = Math.max(bh * pad, minPadPx * k);
+  const X0 = clampN((x0 - px) / w, 0, 1);
+  const Y0 = clampN((y0 - py) / h, 0, 1);
+  const X1 = clampN((x1 + 1 + px) / w, 0, 1);
+  const Y1 = clampN((y1 + 1 + py) / h, 0, 1);
+  return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
+}
+
+/** The image cropped to a normalised rect, as a canvas. */
+export function cropTo(img, r) {
+  const sx = Math.floor(r.x * img.width);
+  const sy = Math.floor(r.y * img.height);
+  const sw = Math.max(1, Math.ceil(r.w * img.width));
+  const sh = Math.max(1, Math.ceil(r.h * img.height));
+  const cv = makeCanvas(sw, sh);
+  cv.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+  return cv;
+}
+
+/** Worth trimming only when it actually removes something; a tight shot
+ *  stays as it is. */
+export function trimWorthwhile(r) {
+  return !!r && r.w * r.h < 0.85;
+}

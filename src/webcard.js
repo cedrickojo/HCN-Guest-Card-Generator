@@ -53,31 +53,44 @@ const rgba = (hex, a) => {
   return `rgba(${r},${g},${b},${a})`;
 };
 
-function setFont(ctx, key, field, s) {
+function fontFor(key, px) {
   const spec = WEB_TEXT[key] || WEB_TEXT.title;
-  ctx.font = `${spec.weight} ${Math.round(field.size * s)}px "${FAMILY[spec.font]}", system-ui, sans-serif`;
+  return `${spec.weight} ${px}px "${FAMILY[spec.font]}", system-ui, sans-serif`;
 }
 
 /** Same contract as card.textRect(), plus the field's key so the chip can pad
- *  its plate. Sizes and positions stay in the studio's units. */
+ *  its plate. Sizes and positions stay in the studio's units. Over-long type
+ *  shrinks to the site's 40 px margins, about its own vertical centre. */
 export function textRect(ctx, field, W, H, s, key = 'title') {
   if (!field.show) return null;
   const lines = splitLines(field.upper ? field.text.toUpperCase() : field.text);
-  setFont(ctx, key, field, s);
-  const size = field.size * s;
-  const lineH = size * 1.2;
-  let maxW = 0;
-  for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln).width);
+  const k = W / 900;
+  const chip = key === 'eyebrow';
+  const measure = (px) => {
+    ctx.font = fontFor(key, px);
+    let w = 0;
+    for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
+    return w;
+  };
+  const fullPx = Math.round(field.size * s);
+  let px = fullPx;
+  let maxW = measure(px);
   // the site's chip is a fixed 96×34 box around 17 px "EP 01": that is 1.5 em
   // of side padding and 0.42 em top and bottom, which also fits "EP 100"
-  const chip = key === 'eyebrow';
-  const padX = chip ? size * 1.5 : 0;
-  const padY = chip ? size * 0.42 : 0;
+  const padOf = (p) => (chip ? [p * 1.5, p * 0.42] : [0, 0]);
+  const availW = W - 2 * 40 * k;
+  if (field.fit !== false && maxW + 2 * padOf(px)[0] > availW) {
+    px = Math.max(8, Math.floor((px * availW) / (maxW + 2 * padOf(px)[0])));
+    maxW = measure(px);
+  }
+  const [padX, padY] = padOf(px);
+  const lineH = px * 1.2;
+  const fullH = fullPx * 1.2 * lines.length + 2 * padOf(fullPx)[1];
   const h = lineH * lines.length + padY * 2;
   const w = maxW + padX * 2;
   const x0 = field.nx * W;
   const x = field.align === 'center' ? x0 - w / 2 : field.align === 'right' ? x0 - w : x0;
-  return { x, y: field.ny * H, w, h, lines, lineH, size, padX, padY, textW: maxW };
+  return { x, y: field.ny * H + (fullH - h) / 2, w, h, lines, lineH, size: px, px, padX, padY, textW: maxW, shrunk: px < fullPx };
 }
 
 /* The glow sits behind the head. The site fixes it at 38% down a square
@@ -159,11 +172,14 @@ export function drawWebCard(ctx, W, H, state, assets, opts = {}) {
       const t = i / 16;
       grad.addColorStop(t, rgba(web.bg, Math.pow(t, scrim.falloff) * scrim.max));
     }
+    // a single fill through to the bottom edge — see card.js for why two
+    // abutting fills leave a hairline
     ctx.fillStyle = grad;
-    ctx.fillRect(0, y0, W, y1 - y0);
+    ctx.fillRect(0, y0, W, H - y0);
+  } else {
+    ctx.fillStyle = rgba(web.bg, scrim.max);
+    ctx.fillRect(0, y1, W, H - y1);
   }
-  ctx.fillStyle = rgba(web.bg, scrim.max);
-  ctx.fillRect(0, y1, W, H - y1);
 
   /* 4. logo plate — the studio's, unchanged, for when a company mark is wanted */
   const plate = plateRect(state.logo, W, H, s);
@@ -184,7 +200,7 @@ export function drawWebCard(ctx, W, H, state, assets, opts = {}) {
     const field = state.text[key];
     const r = textRect(ctx, field, W, H, s, key);
     if (!r) continue;
-    setFont(ctx, key, field, s);
+    ctx.font = fontFor(key, r.px);
     if (key === 'eyebrow') {
       ctx.fillStyle = web.chip;
       ctx.fillRect(r.x, r.y, r.w, r.h);

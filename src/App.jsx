@@ -14,6 +14,7 @@ import {
 import { PALETTES, WEB_DEFAULTS, WEB_TEXT, drawWebCard, exportWebPng, textRect as webTextRect } from './webcard.js';
 import { cutout } from './removeBg.js';
 import { cloudEnhance, cloudStatus } from './enhance.js';
+import { alphaBounds, cropTo, trimWorthwhile } from './matte.js';
 import { ColorRow, DropZone, Group, Row, Segmented, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
 import { Tabs } from './router.jsx';
 
@@ -48,19 +49,33 @@ function defaultScrim(ar, style = 'classic') {
   return { max: 0.94, top: Math.round((0.34 * H) / scaleFor(W, H)), full: 0, falloff: 1 };
 }
 
-function defaultLogo(ar) {
+/* The plate sits bottom-left on the credit line (classic), with the credit
+ * moved to the right to make room; in the website style it takes the top
+ * right, under the HCN mark. `img` decides the plate's width, so the
+ * right-anchored position is computed when one is known. */
+const LOGO_INSET = 60;
+
+function logoPlacement(ar, style, logo) {
   const [W, H] = ASPECTS[ar];
   const s = scaleFor(W, H);
-  return {
-    show: false,
-    img: null,
-    name: '',
-    height: REF.PLATE_H,
-    pad: REF.PLATE_PAD,
-    radius: 1,
-    nx: (REF.MARGIN * s + 155 * s) / W,
-    ny: (H - REF.MARGIN * s - 380 * s) / H,
-  };
+  const M = REF.MARGIN * s;
+  const h = (logo?.height ?? REF.PLATE_H) * s;
+  if (style === 'web') {
+    const k = W / 900;
+    const pad = (logo?.pad ?? REF.PLATE_PAD) * s;
+    const inner = Math.max(1, h - 2 * pad);
+    const w = logo?.img ? (logo.img.width / logo.img.height) * inner + 2 * pad : h * 2;
+    return { nx: (W - 40 * k - w) / W, ny: (100 * k) / H };
+  }
+  // vertically centred on the credit line
+  const titleTop = H - M - REF.TITLE_DY * s;
+  const titleH = REF.TITLE_SIZE * s * 1.24;
+  return { nx: (M + LOGO_INSET * s) / W, ny: (titleTop + (titleH - h) / 2) / H };
+}
+
+function defaultLogo(ar, style = 'classic') {
+  const base = { show: false, img: null, name: '', height: REF.PLATE_H, pad: REF.PLATE_PAD, radius: 1 };
+  return { ...base, ...logoPlacement(ar, style, base) };
 }
 
 const initialState = (ar = '3:4') => ({
@@ -73,6 +88,19 @@ const initialState = (ar = '3:4') => ({
   logo: defaultLogo(ar),
   scrim: defaultScrim(ar),
 });
+
+/* With a logo bottom-left, the credit line moves to the right edge; without
+ * one it returns to centre. Only the classic layout does this — the website
+ * layout is left-aligned throughout and keeps its logo top-right. */
+function creditFor(text, ar, style, logoOn) {
+  if (style === 'web') return text;
+  const [W, H] = ASPECTS[ar];
+  const s = scaleFor(W, H);
+  const title = logoOn
+    ? { ...text.title, align: 'right', nx: (W - REF.MARGIN * s - LOGO_INSET * s) / W }
+    : { ...text.title, align: 'center', nx: 0.5 };
+  return { ...text, title };
+}
 
 const SCRIM_DEFAULTS = defaultScrim('3:4');
 
@@ -286,7 +314,11 @@ export default function App({ path }) {
         if (file.size > 0 && Math.min(...(await dims(file))) < 500 && !useCloud) {
           setStatus(`${file.name} — low resolution, will look soft at full size`);
         }
-        const raw = await cutoutFor(file, file.name);
+        let raw = await cutoutFor(file, file.name);
+        // trim to the opaque extent so a headshot cut from a wide frame isn't a
+        // frame-wide hit box when two are placed together
+        const bounds = alphaBounds(raw);
+        if (trimWorthwhile(bounds)) raw = cropTo(raw, bounds);
         const graded = gradeCutout(raw);
         setState((st) => {
           const z = st.subjects.length ? Math.max(...st.subjects.map((s) => s.z)) + 1 : 0;
@@ -327,10 +359,13 @@ export default function App({ path }) {
       const source = sub.file || sub.raw;
       const r = await cloudEnhance(source, { upscale, removeBackground: true }, (m) => setStatus(`${sub.name} — ${m}`));
       if (!r.cutout) throw new Error('the cloud returned no cut-out');
-      const graded = gradeCutout(r.cutout);
+      let raw = r.cutout;
+      const bounds = alphaBounds(raw);
+      if (trimWorthwhile(bounds)) raw = cropTo(raw, bounds);
+      const graded = gradeCutout(raw);
       setState((st) => ({
         ...st,
-        subjects: st.subjects.map((s) => (s.id === sub.id ? { ...s, raw: r.cutout, img: graded } : s)),
+        subjects: st.subjects.map((s) => (s.id === sub.id ? { ...s, raw, img: graded } : s)),
       }));
       setStatus(r.steps.join(' · '));
     } catch (err) {
@@ -343,9 +378,18 @@ export default function App({ path }) {
   const addLogo = async (file) => {
     const bmp = await createImageBitmap(file);
     const { canvas } = trimLogo(bmp);
-    setState((st) => ({ ...st, logo: { ...st.logo, img: canvas, name: file.name, show: true } }));
+    setState((st) => {
+      const logo = { ...st.logo, img: canvas, name: file.name, show: true };
+      return { ...st, logo: { ...logo, ...logoPlacement(st.ar, st.style, logo) }, text: creditFor(st.text, st.ar, st.style, true) };
+    });
     setSel({ kind: 'logo' });
   };
+
+  const setLogoShow = (on) =>
+    setState((st) => {
+      const logo = { ...st.logo, show: on };
+      return { ...st, logo: on ? { ...logo, ...logoPlacement(st.ar, st.style, logo) } : logo, text: creditFor(st.text, st.ar, st.style, on) };
+    });
 
   /* ---- export ---- */
   const download = async () => {
@@ -399,7 +443,8 @@ export default function App({ path }) {
     setState((st) => {
       if (st.style === style) return st;
       const ar = style === 'web' && st.ar === '3:4' ? '4:5' : style === 'classic' && st.ar === '4:5' ? '3:4' : st.ar;
-      return { ...st, style, ar, text: defaultText(ar, style), scrim: defaultScrim(ar, style) };
+      const text = creditFor(defaultText(ar, style), ar, style, st.logo.show);
+      return { ...st, style, ar, text, scrim: defaultScrim(ar, style), logo: { ...st.logo, ...logoPlacement(ar, style, st.logo) } };
     });
 
   const upd = (path, value) =>
@@ -596,13 +641,17 @@ export default function App({ path }) {
               <Row label="Show">
                 <input type="checkbox" checked={state.text[key].show} onChange={(e) => upd(['text', key, 'show'], e.target.checked)} />
               </Row>
+              <Row label="Shrink to fit width">
+                <input type="checkbox" checked={state.text[key].fit !== false} onChange={(e) => upd(['text', key, 'fit'], e.target.checked)} />
+              </Row>
             </Group>
           ))}
 
           <Group title="Company logo">
             <Row label="Include">
-              <input type="checkbox" checked={state.logo.show} onChange={(e) => upd(['logo', 'show'], e.target.checked)} />
+              <input type="checkbox" checked={state.logo.show} onChange={(e) => setLogoShow(e.target.checked)} />
             </Row>
+            <p className="empty">Sits bottom-left on the credit line; the credit moves to the right to make room. Drag either to adjust.</p>
             <DropZone label={state.logo.img ? `Replace — ${state.logo.name}` : 'Add logo'} onFiles={([f]) => addLogo(f)} />
             <Slider label="Plate height" value={state.logo.height} min={100} max={420} step={2} onChange={(v) => upd(['logo', 'height'], v)} />
             <Slider label="Padding" value={state.logo.pad} min={0} max={140} step={1} onChange={(v) => upd(['logo', 'pad'], v)} />
@@ -615,9 +664,9 @@ export default function App({ path }) {
               onClick={() =>
                 setState((st) => ({
                   ...st,
-                  text: defaultText(st.ar, st.style),
+                  text: creditFor(defaultText(st.ar, st.style), st.ar, st.style, st.logo.show),
                   scrim: defaultScrim(st.ar, st.style),
-                  logo: { ...defaultLogo(st.ar), img: st.logo.img, name: st.logo.name, show: st.logo.show },
+                  logo: { ...defaultLogo(st.ar, st.style), ...logoPlacement(st.ar, st.style, st.logo), img: st.logo.img, name: st.logo.name, show: st.logo.show },
                 }))
               }
             >

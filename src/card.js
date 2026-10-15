@@ -206,23 +206,52 @@ function sheenLayer(W, H) {
 
 /* ---------- layout ---------- */
 
-function setFont(ctx, field, s) {
+function fontFor(field, px) {
   const family = field.font === 'display' ? FONTS.display : FONTS.mono;
-  ctx.font = `${Math.round(field.size * s)}px "${family}"`;
+  return `${px}px "${family}"`;
 }
 
-export function textRect(ctx, field, W, H, s) {
+/* How close to the card's edge type may run before it is shrunk to fit. */
+const TEXT_INSET = 60;
+
+/** Device-pixel width available to a line of type: the card's inner width
+ *  less an inset each side. Shared by both card styles. */
+export function textAvailW(W, H, inset = TEXT_INSET) {
+  const s = scaleFor(W, H);
+  return W - 2 * REF.MARGIN * s - 2 * inset * s;
+}
+
+/** Geometry for one text field. A field that would run past the card is
+ *  shrunk to fit (unless `fit: false`), and shrinks about its own vertical
+ *  centre, so the lines above and below keep their distance from it. `px` is
+ *  the font size actually used; drawing must use it, not field.size. */
+export function textRect(ctx, field, W, H, s, availW = textAvailW(W, H)) {
   if (!field.show) return null;
   const lines = splitLines(field.upper ? field.text.toUpperCase() : field.text);
-  setFont(ctx, field, s);
-  const size = field.size * s;
-  const lineH = size * 1.24;
-  let maxW = 0;
-  for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln).width);
+  const measure = (px) => {
+    ctx.font = fontFor(field, px);
+    let w = 0;
+    for (const ln of lines) w = Math.max(w, ctx.measureText(ln).width);
+    return w;
+  };
+  const fullPx = Math.round(field.size * s);
+  let px = fullPx;
+  let maxW = measure(px);
+  if (field.fit !== false && availW > 0 && maxW > availW) {
+    px = Math.max(8, Math.floor((px * availW) / maxW));
+    maxW = measure(px);
+    // integer rounding can leave it a pixel or two over; one more step settles it
+    if (maxW > availW && px > 8) {
+      px -= 1;
+      maxW = measure(px);
+    }
+  }
+  const lineH = px * 1.24;
+  const fullH = fullPx * 1.24 * lines.length;
   const h = lineH * lines.length;
   const x0 = field.nx * W;
   const x = field.align === 'center' ? x0 - maxW / 2 : field.align === 'right' ? x0 - maxW : x0;
-  return { x, y: field.ny * H, w: maxW, h, lines, lineH, size };
+  return { x, y: field.ny * H + (fullH - h) / 2, w: maxW, h, lines, lineH, size: px, px, shrunk: px < fullPx };
 }
 
 /** Scrim geometry in device pixels. `full` is clamped to `top` so the solid
@@ -326,11 +355,16 @@ export function drawCard(ctx, W, H, state, assets, opts = {}) {
       const t = k / 16;
       grad.addColorStop(t, `rgba(16,14,20,${Math.pow(t, scrimGeom.falloff) * state.scrim.max})`);
     }
+    // one fill from the fade's top to the card's bottom: past y1 the gradient
+    // holds its last stop. Two abutting fills left a lighter hairline where
+    // they met on a fractional row — each covered it partially, and two
+    // partial translucent fills composite to less than one full one.
     ictx.fillStyle = grad;
-    ictx.fillRect(0, scrimGeom.y0, W, scrimGeom.fadeH);
+    ictx.fillRect(0, scrimGeom.y0, W, H - scrimGeom.y0);
+  } else {
+    ictx.fillStyle = `rgba(16,14,20,${state.scrim.max})`;
+    ictx.fillRect(0, scrimGeom.y1, W, H - scrimGeom.y1);
   }
-  ictx.fillStyle = `rgba(16,14,20,${state.scrim.max})`;
-  ictx.fillRect(0, scrimGeom.y1, W, H - scrimGeom.y1);
 
   ctx.save();
   roundRectPath(ctx, cardL, cardT, cardW, cardH, R);
@@ -373,7 +407,7 @@ export function drawCard(ctx, W, H, state, assets, opts = {}) {
     const field = state.text[key];
     const r = textRect(ctx, field, W, H, s);
     if (!r) continue;
-    setFont(ctx, field, s);
+    ctx.font = fontFor(field, r.px);
     ctx.fillStyle = field.color || '#ffffff';
     ctx.textAlign = 'left';
     r.lines.forEach((ln, i) => {

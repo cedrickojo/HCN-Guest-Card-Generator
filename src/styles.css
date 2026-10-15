@@ -443,3 +443,39 @@ canvas.card.cropping {
     transition: none !important;
   }
 }
+
+/* In-place text editor: a textarea laid over the text block on the canvas.
+ * The block itself is hidden on the canvas while this is open; the textarea
+ * carries the same face, size and alignment so the edit reads in place. */
+.inline-edit {
+  position: absolute;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px dashed var(--coral);
+  border-radius: 4px;
+  background: rgba(10, 10, 14, 0.72);
+  color: #fff;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  outline: none;
+  box-shadow: 0 2px 18px rgba(0, 0, 0, 0.45);
+}
+
+.hlbtns {
+  display: flex;
+  gap: 6px;
+}
+
+.hlbtns button {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.seg.grid6 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  width: 100%;
+}

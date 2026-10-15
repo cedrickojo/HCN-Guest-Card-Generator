@@ -64,7 +64,11 @@ no quota — a public deployment with the key set is a public wallet.
 - **Accent colour** — the gradient, glow and border recolour together; the scrim
   and type stay put.
 - **Three text fields** — independent size, alignment, position, show/hide. Use
-  `||` in any field to force a line break.
+  `||` in any field to force a line break. A line that would run past the card
+  shrinks to fit, about its own vertical centre, so the lines above and below
+  keep their distance (per-line *Shrink to fit width* toggle).
+- **Company logo** sits bottom-left on the credit line and moves the credit to
+  the right edge to make room; untick it and the credit returns to centre.
 - **Optional company plate** — white rounded plate that sizes to the logo's
   aspect. Logos are auto-trimmed to their ink, so press-kit PNGs with acres of
   white padding work as-is.
@@ -115,12 +119,20 @@ background image, vignette, cutouts, text.
   shared softness and colour. Smoothstep falloff, because a linear ramp leaves a
   visible band where it meets the untouched middle. Sits under the cutouts by
   default so faces stay lit; tick *Over headshots* to frame the whole composition.
-- **Text** — any number of blocks, each with its own font, size, colour,
-  alignment, line spacing and uppercase toggle. Newlines or `||` break lines.
-  Any block can carry a highlight: a rounded plate behind each line, sized off
-  the glyph bounding box so it hugs the cap height rather than the font's full
-  line box. Keep a highlighted line as its own block, as in the DOAC reference.
-- **Export** — 1280x720 or 1920x1080, PNG or JPEG. The last export's file size is
+- **Text** — any number of blocks, each with its own font (system sans by
+  default), size, colour, alignment, line spacing and uppercase toggle.
+  Newlines or `||` break lines. Double-click a block on the canvas to edit it
+  in place (its section opens in the panel too). Highlights are inline: select
+  a word or line in the box and press *Highlight selection*; it is marked in
+  the text as `==like this==` and drawn as a rounded plate sized off the glyph
+  bounding box, so one block can carry an unhighlighted line and a highlighted
+  one. *Highlight whole block* still plates everything.
+- **HCN logo** — the brand lockup in white, Vital Red or X-Ray Gray, in any of
+  six positions with a size and margin, on by default top-right.
+- **Trimmed cut-outs** — a headshot cut from a wide frame is trimmed to its
+  opaque extent (plus a 10% band for Restore to work in) on import, so its hit
+  box is the person, not the frame.
+- **Export** — 1920x1080 (default) or 1280x720, PNG or JPEG. The last export's file size is
   shown, with a warning past YouTube's 2MB ceiling.
 
 Every upload area takes a file three ways: the button, a drag-and-drop, or a

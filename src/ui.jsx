@@ -41,8 +41,13 @@ export function useBrandFonts() {
 /* Sections collapse to keep the panel scannable; everything starts closed.
  * The whole header is the toggle; `right` (e.g. a remove button) stops
  * propagation so it doesn't double as one. */
-export function Group({ title, right, children, defaultOpen = false }) {
+export function Group({ title, right, children, defaultOpen = false, openSignal = 0 }) {
   const [open, setOpen] = useState(defaultOpen);
+  // a parent can pop a section open (double-clicking text on the canvas opens
+  // its properties) by bumping openSignal; the user can still close it after
+  useEffect(() => {
+    if (openSignal) setOpen(true);
+  }, [openSignal]);
   return (
     <section className="group">
       <h2 className="ghead" onClick={() => setOpen((o) => !o)}>
