@@ -308,11 +308,12 @@ export default function Thumbnail({ path }) {
     const k = cr.width / PREVIEW_W; // preview px -> css px
     const f = FONT_CHOICES.find((x) => x.id === editingItem.font) || FONT_CHOICES[0];
     const lines = Math.max(1, String(editingItem.text).split(/\r?\n|\|\|/).length);
+    const widest = L ? L.w * k : 0;
     const px = editingItem.size * s * k;
     const lineH = px * editingItem.lineGap;
     const top = editingItem.ny * PREVIEW_H * k;
     const left = L ? L.x * k : editingItem.nx * PREVIEW_W * k;
-    const width = Math.max(L ? L.w * k : 0, 180) + 16;
+    const width = Math.max(widest, 180) + 16;
     return {
       left: cr.left - sr.left + left - 8,
       top: cr.top - sr.top + top - 4,
@@ -1053,8 +1054,9 @@ export default function Thumbnail({ path }) {
               ref={editorRef}
               className="inline-edit"
               style={editorStyle}
-              value={editingItem.text}
+              value={String(editingItem.text).replace(/\|\|/g, '\n')}
               spellCheck={false}
+              wrap="off"
               onChange={(e) => updText(editingItem.id, 'text', e.target.value)}
               onBlur={() => setEditing(null)}
               onKeyDown={(e) => {

@@ -17,6 +17,7 @@
 
 import { scaleFor, plateRect, REF } from './card.js';
 import { hexToRgb, roundRectPath, sourceRect, splitLines, subjectRect } from './shared.js';
+import { drawGuides } from './snap.js';
 
 export { plateRect };
 
@@ -199,7 +200,8 @@ export function drawWebCard(ctx, W, H, state, assets, opts = {}) {
   for (const key of ['eyebrow', 'name', 'title']) {
     const field = state.text[key];
     const r = textRect(ctx, field, W, H, s, key);
-    if (!r) continue;
+    // a field being edited in place is drawn by the editor, not the canvas
+    if (!r || key === opts.editingKey) continue;
     ctx.font = fontFor(key, r.px);
     if (key === 'eyebrow') {
       ctx.fillStyle = web.chip;
@@ -225,6 +227,8 @@ export function drawWebCard(ctx, W, H, state, assets, opts = {}) {
     ctx.fillText('HCN', W - 40 * k, 66 * k);
     ctx.textAlign = 'left';
   }
+
+  if (opts.guides) drawGuides(ctx, W, H, opts.guides);
 
   /* 6. selection affordance — preview only */
   if (opts.selection) {

@@ -69,6 +69,13 @@ no quota — a public deployment with the key set is a public wallet.
   keep their distance (per-line *Shrink to fit width* toggle).
 - **Company logo** sits bottom-left on the credit line and moves the credit to
   the right edge to make room; untick it and the credit returns to centre.
+- **In-place editing** — double-click any line on the card to edit it there,
+  in its own face and size; its section opens in the panel.
+- **Snapping** — dragging snaps the item's edges and centre to a periodic grid
+  hung off the card's margin, to the card's centre lines, and to the inner
+  margins; centre beats edges beats grid when more than one is in reach. The
+  grid and the active guide show while dragging. Hold ⌥ to drag freely; the
+  step and the whole thing are set under *Layout*.
 - **Optional company plate** — white rounded plate that sizes to the logo's
   aspect. Logos are auto-trimmed to their ink, so press-kit PNGs with acres of
   white padding work as-is.
@@ -122,7 +129,8 @@ background image, vignette, cutouts, text.
 - **Text** — any number of blocks, each with its own font (system sans by
   default), size, colour, alignment, line spacing and uppercase toggle.
   Newlines or `||` break lines. Double-click a block on the canvas to edit it
-  in place (its section opens in the panel too). Highlights are inline: select
+  in place, laid out on as many lines as it has (its section opens in the
+  panel too). Highlights are inline: select
   a word or line in the box and press *Highlight selection*; it is marked in
   the text as `==like this==` and drawn as a rounded plate sized off the glyph
   bounding box, so one block can carry an unhighlighted line and a highlighted

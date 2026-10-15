@@ -19,6 +19,7 @@ import {
   subjectRect,
   tintGlow,
 } from './shared.js';
+import { drawGuides } from './snap.js';
 
 export { CORAL, hexToRgb, rgbToHex, splitLines, subjectRect };
 
@@ -211,8 +212,11 @@ function fontFor(field, px) {
   return `${px}px "${family}"`;
 }
 
-/* How close to the card's edge type may run before it is shrunk to fit. */
-const TEXT_INSET = 60;
+/* How close to the card's edge type may run before it is shrunk to fit. The
+ * template's own "GUEST NAME" at 318 measures 1901 of the card's 1920, and
+ * that look is the reference — so the inset is just enough to leave it alone
+ * and shrink anything longer. */
+const TEXT_INSET = 8;
 
 /** Device-pixel width available to a line of type: the card's inner width
  *  less an inset each side. Shared by both card styles. */
@@ -406,7 +410,8 @@ export function drawCard(ctx, W, H, state, assets, opts = {}) {
   for (const key of ['eyebrow', 'name', 'title']) {
     const field = state.text[key];
     const r = textRect(ctx, field, W, H, s);
-    if (!r) continue;
+    // a field being edited in place is drawn by the editor, not the canvas
+    if (!r || key === opts.editingKey) continue;
     ctx.font = fontFor(field, r.px);
     ctx.fillStyle = field.color || '#ffffff';
     ctx.textAlign = 'left';
@@ -417,6 +422,8 @@ export function drawCard(ctx, W, H, state, assets, opts = {}) {
       ctx.fillText(ln, x, r.y + i * r.lineH);
     });
   }
+
+  if (opts.guides) drawGuides(ctx, W, H, opts.guides);
 
   /* 6. selection affordances — preview only, never exported */
   if (opts.selection) {

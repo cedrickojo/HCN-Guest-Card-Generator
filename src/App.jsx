@@ -16,6 +16,7 @@ import { cutout } from './removeBg.js';
 import { cloudEnhance, cloudStatus } from './enhance.js';
 import { alphaBounds, cropTo, trimWorthwhile } from './matte.js';
 import { ColorRow, DropZone, Group, Row, Segmented, Slider, clamp, slug, useBrandFonts } from './ui.jsx';
+import { DEFAULT_SNAP, GRID_STEPS, snapRect } from './snap.js';
 import { Tabs } from './router.jsx';
 
 const MAX_PREVIEW = 820;
@@ -122,8 +123,27 @@ export default function App({ path }) {
   });
   const [cloudUpscale, setCloudUpscale] = useState(true);
   const canvasRef = useRef(null);
+  const stageRef = useRef(null);
+  const editorRef = useRef(null);
   const dragRef = useRef(null);
   const presetRef = useRef(null);
+  const [editing, setEditing] = useState(null); // text key being edited on the canvas
+  const [openSig, setOpenSig] = useState({});
+  const [guides, setGuides] = useState(null); // {x, y} active snap lines while dragging
+  const [snap, setSnap] = useState(() => {
+    try {
+      return { ...DEFAULT_SNAP, ...JSON.parse(localStorage.getItem('hcn.cardSnap') || '{}') };
+    } catch {
+      return { ...DEFAULT_SNAP };
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('hcn.cardSnap', JSON.stringify(snap));
+    } catch {
+      /* storage blocked */
+    }
+  }, [snap]);
 
   const fontsReady = useBrandFonts();
   const isWeb = state.style === 'web';
@@ -189,10 +209,62 @@ export default function App({ path }) {
     const ctx = cv.getContext('2d');
     const raf = requestAnimationFrame(() => {
       const draw = isWeb ? drawWebCard : drawCard;
-      draw(ctx, previewW, previewH, state, assets, { selection: selectionRect(ctx) });
+      draw(ctx, previewW, previewH, state, assets, {
+        selection: selectionRect(ctx),
+        editingKey: editing,
+        guides: guides ? { show: true, step: snap.step, x: guides.x, y: guides.y } : null,
+      });
     });
     return () => cancelAnimationFrame(raf);
-  }, [state, assets, fontsReady, previewW, previewH, selectionRect, isWeb]);
+  }, [state, assets, fontsReady, previewW, previewH, selectionRect, isWeb, editing, guides, snap.step]);
+
+  /* ---- in-place text editing (as on the thumbnail page) ---- */
+  const editingField = editing ? state.text[editing] : null;
+  const editorStyle = useMemo(() => {
+    if (!editingField || !canvasRef.current || !stageRef.current) return null;
+    const ctx = canvasRef.current.getContext('2d');
+    const s = scaleFor(previewW, previewH);
+    const r = textRect(ctx, editing, previewW, previewH, s);
+    if (!r) return null;
+    const cr = canvasRef.current.getBoundingClientRect();
+    const sr = stageRef.current.getBoundingClientRect();
+    const k = cr.width / previewW;
+    const spec = isWeb ? WEB_TEXT[editing] : null;
+    const family = isWeb ? (spec.font === 'chip' || spec.font === 'display' ? 'Archivo' : 'Doto') : editingField.font === 'display' ? 'F37Analog' : 'RLOkima';
+    const px = r.px * k;
+    const lineH = r.lineH * k;
+    const lines = Math.max(1, String(editingField.text).split(/\r?\n|\|\|/).length);
+    return {
+      left: cr.left - sr.left + r.x * k - 8,
+      top: cr.top - sr.top + r.y * k - 4,
+      width: Math.max(r.w * k, 160) + 16,
+      height: lineH * lines + 10,
+      fontSize: px,
+      lineHeight: `${lineH}px`,
+      fontFamily: `"${family}", system-ui, sans-serif`,
+      fontWeight: isWeb ? spec.weight : 400,
+      textAlign: editingField.align,
+      textTransform: editingField.upper ? 'uppercase' : 'none',
+      color: editingField.color || (isWeb ? web.ink : '#fff'),
+    };
+  }, [editingField, editing, previewW, previewH, isWeb, state.text, state.style]);
+
+  useEffect(() => {
+    if (editing && editorRef.current) {
+      editorRef.current.focus();
+      editorRef.current.select();
+    }
+  }, [editing]);
+
+  const onDoubleClick = (e) => {
+    const [px, py] = toCanvas(e);
+    const hit = pick(px, py);
+    if (!hit || hit.kind !== 'text') return;
+    dragRef.current = null;
+    setSel({ kind: 'text', key: hit.key });
+    setEditing(hit.key);
+    setOpenSig((o) => ({ ...o, [hit.key]: (o[hit.key] || 0) + 1 }));
+  };
 
   /* ---- hit testing ---- */
   const pick = (px, py) => {
@@ -232,12 +304,37 @@ export default function App({ path }) {
     dragRef.current = { hit, startX: px, startY: py, ref: hit.ref };
   };
 
+  /* Where the dragged thing would sit at (nx, ny), snapped. Hold ⌥ to skip. */
+  const snapped = (st, hit, nx, ny, free) => {
+    if (!snap.on || free) return { nx, ny, guide: null };
+    const ctx = canvasRef.current.getContext('2d');
+    const s = scaleFor(previewW, previewH);
+    let rect = null;
+    if (hit.kind === 'subject') {
+      const sub = st.subjects.find((x) => x.id === hit.id);
+      rect = sub && subjectRect({ ...sub, nx, ny }, previewW, previewH);
+    } else if (hit.kind === 'text') {
+      const field = { ...st.text[hit.key], nx, ny };
+      rect = isWeb ? webTextRect(ctx, field, previewW, previewH, s, hit.key) : classicTextRect(ctx, field, previewW, previewH, s);
+    } else {
+      rect = plateRect({ ...st.logo, nx, ny }, previewW, previewH, s);
+    }
+    if (!rect) return { nx, ny, guide: null };
+    const r = snapRect(rect, previewW, previewH, snap.step);
+    return { nx: nx + r.dx / previewW, ny: ny + r.dy / previewH, guide: { x: r.guideX, y: r.guideY } };
+  };
+
   const onPointerMove = (e) => {
     const d = dragRef.current;
     if (!d) return;
     const [px, py] = toCanvas(e);
-    const nx = d.ref.nx + (px - d.startX) / previewW;
-    const ny = d.ref.ny + (py - d.startY) / previewH;
+    const rawX = d.ref.nx + (px - d.startX) / previewW;
+    const rawY = d.ref.ny + (py - d.startY) / previewH;
+    const free = e.altKey;
+    // snapped against the current render's state — a frame stale at worst,
+    // and it keeps the state updater free of side effects
+    const { nx, ny, guide } = snapped(state, d.hit, rawX, rawY, free);
+    setGuides(snap.on && !free ? { x: guide?.x ?? null, y: guide?.y ?? null } : null);
     setState((st) => {
       if (d.hit.kind === 'subject') return { ...st, subjects: st.subjects.map((s) => (s.id === d.hit.id ? { ...s, nx, ny } : s)) };
       if (d.hit.kind === 'text') return { ...st, text: { ...st.text, [d.hit.key]: { ...st.text[d.hit.key], nx, ny } } };
@@ -248,6 +345,7 @@ export default function App({ path }) {
   const endDrag = (e) => {
     if (dragRef.current) canvasRef.current.releasePointerCapture?.(e.pointerId);
     dragRef.current = null;
+    setGuides(null);
   };
 
   // wheel must be a non-passive listener or preventDefault() is ignored
@@ -503,7 +601,7 @@ export default function App({ path }) {
       </header>
 
       <main>
-        <section className="stage">
+        <section className="stage" ref={stageRef}>
           <canvas
             ref={canvasRef}
             className="card"
@@ -512,9 +610,32 @@ export default function App({ path }) {
             onPointerMove={onPointerMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
+            onDoubleClick={onDoubleClick}
           />
+          {editingField && editorStyle && (
+            <textarea
+              ref={editorRef}
+              className="inline-edit"
+              style={editorStyle}
+              value={String(editingField.text).replace(/\|\|/g, '\n')}
+              spellCheck={false}
+              wrap="off"
+              onChange={(e) => upd(['text', editing, 'text'], e.target.value)}
+              onBlur={() => setEditing(null)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
+                  e.preventDefault();
+                  setEditing(null);
+                }
+                e.stopPropagation();
+              }}
+            />
+          )}
           <p className="hint">
-            {status || 'Drag anything on the card. Scroll to scale a selected headshot. Arrow keys nudge.'}
+            {status ||
+              (editing
+                ? 'Editing on the card — Esc or ⌘Enter to finish.'
+                : `Drag anything on the card${snap.on ? ' — it snaps to the grid, centre and margins; hold ⌥ to drag freely' : ''}. Double-click text to edit it in place.`)}
           </p>
         </section>
 
@@ -620,7 +741,7 @@ export default function App({ path }) {
           </Group>
 
           {['eyebrow', 'name', 'title'].map((key, i) => (
-            <Group key={key} title={`Line ${i + 1} — ${lineLabels[key]}`}>
+            <Group key={key} title={`Line ${i + 1} — ${lineLabels[key]}`} openSignal={openSig[key] || 0}>
               <textarea
                 rows={key === 'title' ? 2 : 1}
                 value={state.text[key].text}
@@ -659,6 +780,17 @@ export default function App({ path }) {
           </Group>
 
           <Group title="Layout">
+            <Row label="Snap while dragging">
+              <input type="checkbox" checked={snap.on} onChange={(e) => setSnap((x) => ({ ...x, on: e.target.checked }))} />
+            </Row>
+            <Row label="Grid step">
+              <select value={snap.step} onChange={(e) => setSnap((x) => ({ ...x, step: Number(e.target.value) }))}>
+                {GRID_STEPS.map((g) => (
+                  <option key={g} value={g}>{g} units</option>
+                ))}
+              </select>
+            </Row>
+            <p className="empty">Snaps the dragged item's edges and centre to the grid, the card's centre lines and the inner margins. Hold ⌥ for a free drag.</p>
             <button
               className="wide ghost"
               onClick={() =>
